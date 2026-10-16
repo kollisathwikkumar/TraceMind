@@ -85,6 +85,26 @@ describe('incident API', () => {
     expect(await bundle.text()).toContain('/api/v1/auth/validate');
   });
 
+  it('allows Auth0 token exchange only on admin pages', async () => {
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      auth0Config: {
+        domain: 'tenant.example.auth0.com',
+        clientId: 'public-client',
+        audience: 'https://api.example.test',
+        issuer: 'https://tenant.example.auth0.com/',
+      },
+    });
+
+    const admin = await fetch(`${base}/admin?code=callback-code&state=callback-state`);
+    expect(admin.headers.get('content-security-policy')).toContain(
+      "connect-src 'self' https://tenant.example.auth0.com;"
+    );
+
+    const api = await fetch(`${base}/api/v1/auth/config`);
+    expect(api.headers.get('content-security-policy')).toContain("connect-src 'self';");
+    expect(api.headers.get('content-security-policy')).not.toContain('tenant.example.auth0.com');
+  });
+
   it('validates dashboard credentials without requiring auth for the public health check', async () => {
     const base = await startApi();
     const health = await fetch(`${base}/api/v1/health`);

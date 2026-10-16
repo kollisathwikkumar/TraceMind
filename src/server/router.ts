@@ -93,9 +93,13 @@ export function createRouter(routerConfig: RouterConfig) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    const adminAuth0Origin =
+      /^\/admin(?:\/|$)/.test(path) && routerConfig.auth0Config
+        ? new URL(routerConfig.auth0Config.issuer).origin
+        : undefined;
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
     );
     if (method === 'OPTIONS' && cors.enabled) {
       res.writeHead(204);
