@@ -30,6 +30,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Build admin assets for integration tests
+        run: npm run build:admin
+
       - name: Run tests
         run: npm run test
 
