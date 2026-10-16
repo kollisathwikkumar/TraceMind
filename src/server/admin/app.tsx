@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
 import { AdminApi } from './api';
 import { Layout } from './components/Layout';
@@ -14,6 +14,7 @@ import { Remediations } from './components/Remediations';
 import { EvaluationAnalyticsPage } from './components/EvaluationAnalytics';
 import { Settings } from './components/Settings';
 import { safeAuthReturnTarget } from './auth-routing';
+import { RedirectFirstAuth0Client } from './redirect-first-auth0-client';
 
 interface AuthConfig {
   enabled: boolean;
@@ -243,15 +244,27 @@ export function App() {
       </div>
     );
   }
+
+  return <ConfiguredAuthApp config={config} />;
+}
+
+function ConfiguredAuthApp({ config }: { config: AuthConfig }) {
+  const client = useMemo(
+    () =>
+      new RedirectFirstAuth0Client({
+        domain: config.domain,
+        clientId: config.clientId,
+        authorizationParams: {
+          redirect_uri: `${window.location.origin}/admin`,
+          audience: config.audience,
+          scope: 'openid profile email',
+        },
+      }),
+    [config]
+  );
   return (
     <Auth0Provider
-      domain={config.domain}
-      clientId={config.clientId}
-      authorizationParams={{
-        redirect_uri: `${window.location.origin}/admin`,
-        audience: config.audience,
-        scope: 'openid profile email',
-      }}
+      client={client}
       onRedirectCallback={(appState) => {
         const returnTo = (appState as { returnTo?: string } | undefined)?.returnTo;
         const target = safeAuthReturnTarget(returnTo, window.location.origin);

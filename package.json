@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@auth0/auth0-react": "^2.28.2",
+    "@auth0/auth0-spa-js": "^2.28.4",
     "@aws-sdk/client-amplify": "^3.985.0",
     "@aws-sdk/client-cloudwatch": "^3.600.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.600.0",
