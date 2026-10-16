@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1180" viewBox="0 0 1800 1180" role="img" aria-labelledby="title desc">
+  <title id="title">TraceMind — complete backend architecture</title>
+  <desc id="desc">Architecture diagram showing clients, authenticated Node.js API and MCP server, knowledge, incident, graph and workflow services, PostgreSQL and SQLite persistence, FalkorDB, LLM provider and registered remediation integrations.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f7faff"/><stop offset="1" stop-color="#eef4fb"/></linearGradient>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#122846"/><stop offset="1" stop-color="#203f64"/></linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#173553" flood-opacity=".10"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#6583a6"/></marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#169c9a"/></marker>
+    <style>
+      text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#17324f}
+      .title{font-size:38px;font-weight:750;letter-spacing:-.7px;fill:#112743}
+      .subtitle{font-size:17px;fill:#58718e}
+      .section{font-size:13px;font-weight:750;letter-spacing:1.6px;fill:#67809a}
+      .head{font-size:19px;font-weight:730;fill:#17324f}
+      .body{font-size:14px;fill:#4d6682}
+      .small{font-size:12px;fill:#627b96}
+      .chip{font-size:11px;font-weight:700;letter-spacing:.7px}
+      .box{fill:#fff;stroke:#d8e3ef;stroke-width:1.5;filter:url(#shadow)}
+      .line{fill:none;stroke:#7891ac;stroke-width:2;marker-end:url(#arrow)}
+      .line2{fill:none;stroke:#169c9a;stroke-width:2.4;marker-end:url(#arrowTeal)}
+    </style>
+  </defs>
+  <rect width="1800" height="1180" rx="0" fill="url(#bg)"/>
+  <circle cx="1650" cy="60" r="185" fill="#dff2f4" opacity=".42"/><circle cx="95" cy="1070" r="220" fill="#dce9fb" opacity=".55"/>
+
+  <text x="70" y="74" class="title">TraceMind · Backend Architecture</text>
+  <text x="72" y="107" class="subtitle">Incident intelligence → graph evidence → controlled remediation → verified outcome</text>
+  <rect x="1510" y="46" width="220" height="36" rx="18" fill="#dcefeb"/><text x="1620" y="69" text-anchor="middle" class="chip" fill="#137b78">LOCAL + PRODUCTION</text>
+
+  <!-- Client layer -->
+  <text x="72" y="158" class="section">1 · ENTRY POINTS</text>
+  <g>
+    <rect x="70" y="178" width="350" height="104" rx="18" class="box"/>
+    <circle cx="108" cy="214" r="18" fill="#e7efff"/><text x="108" y="220" text-anchor="middle" font-size="17" fill="#3e67c4">◈</text>
+    <text x="140" y="215" class="head">Admin console</text><text x="96" y="249" class="body">Incidents · graph evidence · remediation · analytics</text>
+    <text x="96" y="269" class="small">Browser UI · bearer API key</text>
+
+    <rect x="450" y="178" width="350" height="104" rx="18" class="box"/>
+    <circle cx="488" cy="214" r="18" fill="#e9e4ff"/><text x="488" y="220" text-anchor="middle" font-size="17" fill="#7257c6">⌘</text>
+    <text x="520" y="215" class="head">CLI &amp; agent runtime</text><text x="476" y="249" class="body">Investigate · retrieve knowledge · call tools</text>
+    <text x="476" y="269" class="small">Node.js CLI · configured providers</text>
+
+    <rect x="830" y="178" width="350" height="104" rx="18" class="box"/>
+    <circle cx="868" cy="214" r="18" fill="#fff0df"/><text x="868" y="220" text-anchor="middle" font-size="17" fill="#c07a26">⇢</text>
+    <text x="900" y="215" class="head">API &amp; event clients</text><text x="856" y="249" class="body">REST clients · Slack/webhook integrations</text>
+    <text x="856" y="269" class="small">Bearer-authenticated HTTP operations</text>
+
+    <rect x="1210" y="178" width="520" height="104" rx="18" class="box"/>
+    <circle cx="1248" cy="214" r="18" fill="#dcf4f2"/><text x="1248" y="220" text-anchor="middle" font-size="16" fill="#168d8b">M</text>
+    <text x="1280" y="215" class="head">MCP clients</text><text x="1236" y="249" class="body">Model Context Protocol tools over /mcp or stdio</text>
+    <text x="1236" y="269" class="small">Shared knowledge/retrieval capabilities</text>
+  </g>
+
+  <!-- Client to API arrows -->
+  <path d="M245 282V315H850V344" class="line"/><path d="M625 282V344" class="line"/><path d="M1005 282V315H950V344" class="line"/><path d="M1470 282V315H1010V344" class="line"/>
+
+  <!-- API gateway -->
+  <rect x="300" y="344" width="1200" height="126" rx="24" fill="url(#navy)" filter="url(#shadow)"/>
+  <text x="350" y="386" font-size="24" font-weight="750" fill="#fff">TraceMind Server · Node.js HTTP API</text>
+  <text x="350" y="418" font-size="15" fill="#d2e0f0">Router · request validation · bounded payloads · security headers · component readiness probes</text>
+  <rect x="350" y="436" width="142" height="23" rx="11" fill="#dce8f7"/><text x="421" y="452" text-anchor="middle" class="chip" fill="#183654">BEARER AUTH</text>
+  <text x="520" y="453" font-size="12" fill="#d2e0f0">Health is public · application APIs require configured API key</text>
+  <rect x="1090" y="368" width="360" height="72" rx="15" fill="#244c70" stroke="#547596"/>
+  <text x="1114" y="395" font-size="14" font-weight="700" fill="#fff">REST surface</text>
+  <text x="1114" y="419" font-size="12" fill="#d2e0f0">health/auth · knowledge · incidents · graph</text>
+  <text x="1114" y="435" font-size="12" fill="#d2e0f0">remediation · evaluations · LLM validation</text>
+
+  <!-- API to domain -->
+  <path d="M900 470V505" class="line2"/>
+  <text x="72" y="516" class="section">2 · DOMAIN SERVICES</text>
+
+  <g>
+    <rect x="70" y="538" width="390" height="206" rx="20" class="box"/>
+    <rect x="70" y="538" width="390" height="9" rx="5" fill="#5279dc"/>
+    <text x="98" y="584" class="head">Knowledge &amp; retrieval</text>
+    <text x="98" y="615" class="body">Search · source sync · document CRUD</text>
+    <text x="98" y="641" class="body">Retriever combines configured knowledge</text>
+    <text x="98" y="667" class="body">MCP tools expose search and known context</text>
+    <rect x="98" y="698" width="142" height="25" rx="12" fill="#e9efff"/><text x="169" y="715" text-anchor="middle" class="chip" fill="#3d61b1">LOCAL DATA</text>
+    <text x="256" y="715" class="small">runbooks · GitHub · configured sources</text>
+
+    <rect x="490" y="538" width="390" height="206" rx="20" class="box"/>
+    <rect x="490" y="538" width="390" height="9" rx="5" fill="#169c9a"/>
+    <text x="518" y="584" class="head">Incident &amp; audit service</text>
+    <text x="518" y="615" class="body">Create · list · update · event timeline</text>
+    <text x="518" y="641" class="body">Severity and lifecycle state validation</text>
+    <text x="518" y="667" class="body">Audit events persist with each change</text>
+    <rect x="518" y="698" width="174" height="25" rx="12" fill="#e2f4f2"/><text x="605" y="715" text-anchor="middle" class="chip" fill="#137b78">RELATIONAL STORE</text>
+
+    <rect x="910" y="538" width="390" height="206" rx="20" class="box"/>
+    <rect x="910" y="538" width="390" height="9" rx="5" fill="#a16de0"/>
+    <text x="938" y="584" class="head">Dependency graph service</text>
+    <text x="938" y="615" class="body">Service/dependency graph writes</text>
+    <text x="938" y="641" class="body">Organization-scoped evidence paths</text>
+    <text x="938" y="667" class="body">Bounded Cypher traversal · depth 1–4</text>
+    <rect x="938" y="698" width="166" height="25" rx="12" fill="#f0e8fc"/><text x="1021" y="715" text-anchor="middle" class="chip" fill="#7652ad">GRAPH PROJECTION</text>
+
+    <rect x="1330" y="538" width="400" height="206" rx="20" class="box"/>
+    <rect x="1330" y="538" width="400" height="9" rx="5" fill="#e39a42"/>
+    <text x="1358" y="584" class="head">Remediation &amp; evaluation</text>
+    <text x="1358" y="615" class="body">Propose → approve/reject → execute</text>
+    <text x="1358" y="641" class="body">Registered actions · post-check · rollback</text>
+    <text x="1358" y="667" class="body">Paired baseline/graph case scoring</text>
+    <rect x="1358" y="698" width="185" height="25" rx="12" fill="#fff0df"/><text x="1450" y="715" text-anchor="middle" class="chip" fill="#a56b25">AUDITED WORKFLOW</text>
+  </g>
+
+  <!-- horizontal domain dependencies -->
+  <path d="M460 638H490" class="line"/><path d="M880 638H910" class="line"/><path d="M1300 638H1330" class="line"/>
+  <text x="70" y="795" class="section">3 · PERSISTENCE &amp; EXTERNAL SYSTEMS</text>
+
+  <!-- Storage layer -->
+  <rect x="70" y="817" width="390" height="225" rx="20" fill="#fff" stroke="#cad8e7" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="70" y="817" width="390" height="52" rx="20" fill="#e8efff"/><path d="M70 849v20h390v-20" fill="#e8efff"/>
+  <text x="98" y="851" class="head">Knowledge SQLite</text>
+  <text x="98" y="898" class="body">Local knowledge documents &amp; retrieval index</text>
+  <text x="98" y="925" class="body">Created beneath server base directory</text>
+  <text x="98" y="966" class="small">Knowledge source: local configured store</text>
+  <rect x="98" y="992" width="139" height="25" rx="12" fill="#e9efff"/><text x="167" y="1009" text-anchor="middle" class="chip" fill="#3d61b1">KNOWLEDGE</text>
+
+  <rect x="490" y="817" width="550" height="225" rx="20" fill="#fff" stroke="#b8e0dc" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="490" y="817" width="550" height="52" rx="20" fill="#def2ef"/><path d="M490 849v20h550v-20" fill="#def2ef"/>
+  <text x="518" y="851" class="head">PostgreSQL · relational source of truth</text>
+  <text x="518" y="898" class="body">incidents · incident_events · remediation_plans</text>
+  <text x="518" y="925" class="body">remediation_steps/events · evaluation_cases</text>
+  <text x="518" y="966" class="small">Parameterized SQL · transactional audit writes · migrations at startup</text>
+  <rect x="518" y="992" width="168" height="25" rx="12" fill="#e2f4f2"/><text x="602" y="1009" text-anchor="middle" class="chip" fill="#137b78">DEPLOYED MODE</text>
+
+  <rect x="1070" y="817" width="340" height="225" rx="20" fill="#fff" stroke="#d9c8ef" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="1070" y="817" width="340" height="52" rx="20" fill="#f0e8fc"/><path d="M1070 849v20h340v-20" fill="#f0e8fc"/>
+  <text x="1098" y="851" class="head">FalkorDB</text>
+  <text x="1098" y="898" class="body">Graph: services + DEPENDS_ON</text>
+  <text x="1098" y="925" class="body">Incident AFFECTS service links</text>
+  <text x="1098" y="966" class="small">Separate projection · graphName + orgId</text>
+  <rect x="1098" y="992" width="180" height="25" rx="12" fill="#f0e8fc"/><text x="1188" y="1009" text-anchor="middle" class="chip" fill="#7652ad">EVIDENCE GRAPH</text>
+
+  <rect x="1440" y="817" width="290" height="225" rx="20" fill="#fff" stroke="#f0d3ad" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="1440" y="817" width="290" height="52" rx="20" fill="#fff0df"/><path d="M1440 849v20h290v-20" fill="#fff0df"/>
+  <text x="1468" y="851" class="head">External adapters</text>
+  <text x="1468" y="898" class="body">LLM provider</text>
+  <text x="1468" y="925" class="body">Registered action/check/rollback</text>
+  <text x="1468" y="952" class="body">Cloud / telemetry tools</text>
+  <text x="1468" y="989" class="small">Injected integrations; not shell input</text>
+
+  <!-- Domain to stores -->
+  <path d="M265 744V780H265V817" class="line"/>
+  <path d="M685 744V780H765V817" class="line2"/>
+  <path d="M1105 744V780H1240V817" class="line2"/>
+  <path d="M1530 744V780H960V817" class="line"/>
+  <path d="M1530 744V782H1585V817" class="line"/>
+  <path d="M1490 470V500H1580V817" class="line"/>
+
+  <!-- local fallback -->
+  <rect x="490" y="1070" width="550" height="58" rx="15" fill="#f8fafc" stroke="#cbd8e6" stroke-dasharray="6 5"/>
+  <text x="515" y="1095" class="body" font-weight="700">Local fallback</text>
+  <text x="515" y="1117" class="small">Without TRACEMIND_DATABASE_URL: incidents/workflows use incidents.sqlite (SQLite)</text>
+  <path d="M765 1042V1070" fill="none" stroke="#8ea2b8" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+
+  <text x="70" y="1155" class="small">Solid arrows = active request/data flow · PostgreSQL and FalkorDB are independently configured · health probes check configured stores</text>
+  <text x="1730" y="1155" text-anchor="end" class="small">TraceMind · backend overview</text>
+</svg>

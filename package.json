@@ -1,0 +1,109 @@
+{
+  "name": "tracemind",
+  "version": "0.8.0",
+  "description": "TraceMind incident intelligence: graph evidence, incident memory, and controlled remediation",
+  "type": "module",
+  "main": "dist/cli.js",
+  "repository": "https://github.com/kollisathwikkumar/TraceMind.git",
+  "bin": {
+    "tracemind": "dist/cli.js",
+    "runbook": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.tsx",
+    "build": "tsup && chmod +x dist/cli.js && npm run build:admin",
+    "build:admin": "node scripts/build-admin.mjs --minify",
+    "lint": "eslint src --ext .ts,.tsx",
+    "format": "prettier --write src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval:investigate": "tsx src/eval/investigation-benchmark.ts",
+    "eval:setup": "tsx src/eval/setup-datasets.ts",
+    "eval:convert:rcaeval": "tsx src/eval/rcaeval-to-fixtures.ts",
+    "eval:convert:rootly": "tsx src/eval/rootly-logs-to-fixtures.ts",
+    "eval:convert:tracerca": "tsx src/eval/tracerca-to-fixtures.ts",
+    "eval:all": "tsx src/eval/run-all-benchmarks.ts",
+    "eval:smoke": "tsx src/eval/run-all-benchmarks.ts --offline --no-setup --benchmarks rcaeval,tracerca --limit 1 --rcaeval-input examples/evals/rcaeval-input.sample.json --tracerca-input examples/evals/tracerca-input.sample.json",
+    "simulate:setup": "bash scripts/simulate/setup-incidents.sh",
+    "simulate:cleanup": "bash scripts/simulate/cleanup-incidents.sh",
+    "release": "bash scripts/release/trigger-release.sh",
+    "release:dry-run": "bash scripts/release/trigger-release.sh --dry-run",
+    "release:skip-checks": "bash scripts/release/trigger-release.sh --skip-checks",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@auth0/auth0-react": "^2.28.2",
+    "@aws-sdk/client-amplify": "^3.985.0",
+    "@aws-sdk/client-cloudwatch": "^3.600.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.985.0",
+    "@aws-sdk/client-ec2": "^3.600.0",
+    "@aws-sdk/client-ecs": "^3.600.0",
+    "@aws-sdk/client-eks": "^3.985.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "^3.985.0",
+    "@aws-sdk/client-elasticache": "^3.600.0",
+    "@aws-sdk/client-iam": "^3.600.0",
+    "@aws-sdk/client-lambda": "^3.600.0",
+    "@aws-sdk/client-rds": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/client-sts": "^3.985.0",
+    "@aws-sdk/credential-providers": "^3.985.0",
+    "@mariozechner/pi-ai": "^0.52.7",
+    "@slack/web-api": "^7.0.0",
+    "asciichart": "^1.5.25",
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.3.0",
+    "cli-highlight": "^2.1.11",
+    "cli-table3": "^0.6.5",
+    "commander": "^12.1.0",
+    "falkordb": "6.6.0",
+    "gray-matter": "^4.0.3",
+    "ink": "^5.0.1",
+    "ink-spinner": "^5.0.0",
+    "jose": "^6.2.12",
+    "pg": "^8.23.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yaml": "^2.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/bun": "^1.1.0",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.71.2",
+    "@typescript-eslint/parser": "^8.71.2",
+    "esbuild": "^0.28.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.3.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.5.0",
+    "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=20.0.0 <25"
+  },
+  "lint-staged": {
+    "src/**/*.{ts,tsx}": [
+      "eslint",
+      "prettier --check"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "overrides": {
+    "basic-ftp": "^6.2.3",
+    "esbuild": "^0.28.2"
+  }
+}

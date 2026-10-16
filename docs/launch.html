@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#245bdc" />
+    <meta
+      name="description"
+      content="TraceMind connects incident signals, service context, evidence and runbooks so on-call teams can move from alert to understanding."
+    />
+    <title>TraceMind — Follow the signal</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%23245bdc'/%3E%3Cpath d='M10 13h20M20 13v16' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='20' cy='30' r='3' fill='%23d9ff3f'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="launch.css" />
+  </head>
+  <body>
+    <nav class="top-nav" aria-label="Main navigation">
+      <a class="brand" href="#top" aria-label="TraceMind home"
+        ><span class="brand-mark">T<i></i></span><span>TraceMind</span></a
+      >
+      <a class="nav-context" href="#how">Incident intelligence <i></i> Evidence-first response</a>
+      <a class="nav-cta" href="http://localhost:3000/admin">Open dashboard <span>↗</span></a>
+    </nav>
+
+    <main>
+      <header class="hero" id="top">
+        <canvas class="arrow-field" aria-hidden="true"></canvas>
+        <div class="hero-brandline">
+          <span class="hero-symbol">✳</span><span>TRACEMIND <i>/</i> INCIDENT OPERATIONS</span>
+        </div>
+        <div class="hero-copy">
+          <p class="overline"><span></span> FOR THE PEOPLE ON CALL</p>
+          <h1>TraceMind</h1>
+          <p class="hero-tagline">See the incident.<br /><em>Follow the signal.</em></p>
+          <p class="hero-description">
+            A clearer way to connect alerts, infrastructure evidence, service relationships, and the
+            knowledge your team already has.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-lime" href="#expect">Step inside <span>↓</span></a
+            ><a class="button button-quiet" href="http://localhost:3000/admin"
+              >Open the dashboard <span>↗</span></a
+            >
+          </div>
+        </div>
+        <div class="hero-note">
+          <span>01 — INCIDENT RESPONSE, RECONNECTED</span
+          ><span class="scroll-cue"><i></i> SCROLL TO EXPLORE</span>
+        </div>
+      </header>
+
+      <section class="graph-engine" id="falkordb" aria-labelledby="graph-engine-title">
+        <div class="graph-engine-inner">
+          <div class="graph-engine-copy">
+            <p class="section-index">01 <span>/</span> GRAPH CONTEXT</p>
+            <div class="graph-engine-name"><span class="graph-engine-mark">F</span> FALKORDB</div>
+            <h2 id="graph-engine-title">Incidents make more sense <em>in context.</em></h2>
+            <p class="graph-engine-description">
+              TraceMind uses FalkorDB as a graph projection of service dependencies and incident
+              evidence. During triage, it can trace a service neighborhood and surface past
+              incidents connected by shared services.
+            </p>
+            <div class="graph-engine-points" aria-label="What the graph connects">
+              <span><i>01</i> Service dependencies</span>
+              <span><i>02</i> Related incidents</span>
+              <span><i>03</i> Evidence paths</span>
+            </div>
+            <p class="graph-engine-footnote">
+              PostgreSQL remains the system of record. Graph context is available when FalkorDB is
+              configured.
+            </p>
+          </div>
+          <div
+            class="graph-engine-visual"
+            role="img"
+            aria-label="Incident evidence graph connecting an incident to affected services and dependencies"
+          >
+            <div class="graph-visual-label">
+              <span>TRACE THE CONNECTION</span><span>GRAPH PROJECTION</span>
+            </div>
+            <svg class="evidence-graph" viewBox="0 0 560 340" aria-hidden="true">
+              <defs>
+                <linearGradient id="graph-line" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#8eabff" />
+                  <stop offset="1" stop-color="#c9d5f1" />
+                </linearGradient>
+                <filter id="node-shadow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feDropShadow
+                    dx="0"
+                    dy="8"
+                    stdDeviation="10"
+                    flood-color="#102b73"
+                    flood-opacity=".12"
+                  />
+                </filter>
+              </defs>
+              <path
+                class="graph-edge"
+                d="M120 169 244 91M120 169 244 248M278 91 405 142M278 248 405 192M278 91 278 248"
+              />
+              <path class="graph-edge graph-edge-active" d="M120 169 244 91 405 142" />
+              <circle class="graph-edge-pulse" cx="0" cy="0" r="4">
+                <animateMotion dur="3.8s" repeatCount="indefinite" path="M120 169 244 91 405 142" />
+              </circle>
+              <circle class="graph-edge-pulse graph-edge-pulse-delay" cx="0" cy="0" r="3">
+                <animateMotion
+                  dur="3.8s"
+                  begin="1.4s"
+                  repeatCount="indefinite"
+                  path="M120 169 244 91 405 142"
+                />
+              </circle>
+              <g
+                class="graph-node graph-node-incident"
+                transform="translate(52 132)"
+                filter="url(#node-shadow)"
+              >
+                <rect width="136" height="74" rx="14" />
+                <text class="graph-node-kicker" x="18" y="27">INCIDENT</text>
+                <text class="graph-node-title" x="18" y="51">API latency</text>
+              </g>
+              <g
+                class="graph-node graph-node-service"
+                transform="translate(211 54)"
+                filter="url(#node-shadow)"
+              >
+                <rect width="136" height="74" rx="14" />
+                <text class="graph-node-kicker" x="18" y="27">SERVICE</text>
+                <text class="graph-node-title" x="18" y="51">Checkout API</text>
+              </g>
+              <g
+                class="graph-node graph-node-service"
+                transform="translate(211 211)"
+                filter="url(#node-shadow)"
+              >
+                <rect width="136" height="74" rx="14" />
+                <text class="graph-node-kicker" x="18" y="27">DEPENDENCY</text>
+                <text class="graph-node-title" x="18" y="51">Payments DB</text>
+              </g>
+              <g
+                class="graph-node graph-node-history"
+                transform="translate(372 128)"
+                filter="url(#node-shadow)"
+              >
+                <rect width="142" height="74" rx="14" />
+                <text class="graph-node-kicker" x="18" y="27">RELATED INCIDENT</text>
+                <text class="graph-node-title" x="18" y="51">Connection pool</text>
+              </g>
+              <text class="graph-edge-label" x="182" y="112">AFFECTS</text>
+              <text class="graph-edge-label" x="181" y="231">DEPENDS ON</text>
+              <text class="graph-edge-label" x="352" y="99">SHARED SERVICE</text>
+            </svg>
+            <div class="graph-visual-footer">
+              <span class="graph-live-dot"></span> Relationships make the next question easier to
+              ask.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section expect-section" id="expect">
+        <div class="section-head">
+          <p class="section-index">02 <span>/</span> WHAT TO EXPECT</p>
+          <h2>Calm the noise.<br /><em>Keep the context.</em></h2>
+          <p class="section-intro">
+            Incident response is a chain of decisions. TraceMind gives each one more context, so
+            responders can move with clarity instead of switching between disconnected tools.
+          </p>
+        </div>
+        <div class="expect-grid">
+          <article class="expect-item">
+            <div class="glyph glyph-arrow" aria-hidden="true">
+              <svg viewBox="0 0 80 80"><path d="M20 59 58 21M29 21h29v29" /></svg>
+            </div>
+            <p class="item-index">01 / INVESTIGATE</p>
+            <h3>Start with a hypothesis.</h3>
+            <p>Break an incident into plausible causes, then test each one with targeted checks.</p>
+          </article>
+          <article class="expect-item">
+            <div class="glyph glyph-ring" aria-hidden="true">
+              <svg viewBox="0 0 80 80">
+                <circle cx="40" cy="40" r="22" />
+                <circle cx="40" cy="40" r="7" />
+              </svg>
+            </div>
+            <p class="item-index">02 / CONNECT</p>
+            <h3>Follow what it touches.</h3>
+            <p>
+              See affected services alongside dependencies, telemetry, and operational knowledge.
+            </p>
+          </article>
+          <article class="expect-item">
+            <div class="glyph glyph-plus" aria-hidden="true">
+              <svg viewBox="0 0 80 80"><path d="M40 17v46M17 40h46" /></svg>
+            </div>
+            <p class="item-index">03 / RESPOND</p>
+            <h3>Make the next move legible.</h3>
+            <p>
+              Keep evidence, recommended steps, and review status together from triage to
+              resolution.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="audience-section" aria-labelledby="audience-title">
+        <div class="section-shell audience-shell">
+          <div class="audience-top">
+            <p class="section-index">03 <span>/</span> THE PEOPLE ON CALL</p>
+            <h2 id="audience-title">On your side<br />of the incident.</h2>
+          </div>
+          <div class="role-picker" role="tablist" aria-label="Choose your role">
+            <button class="role-tab is-selected" role="tab" aria-selected="true" data-role="sre">
+              SRE / On-call
+            </button>
+            <button class="role-tab" role="tab" aria-selected="false" data-role="platform">
+              Platform engineer
+            </button>
+            <button class="role-tab" role="tab" aria-selected="false" data-role="commander">
+              Incident lead
+            </button>
+            <button class="role-tab" role="tab" aria-selected="false" data-role="lead">
+              Engineering lead
+            </button>
+          </div>
+          <div class="role-copy" aria-live="polite">
+            <p class="role-eyebrow">A workspace that meets you where you are</p>
+            <h3 id="role-headline">
+              Your first hour should start with evidence, not a blank page.
+            </h3>
+            <p id="role-description">
+              Trace alerts across services, test likely causes, and keep the investigation readable
+              for everyone joining the response.
+            </p>
+          </div>
+          <div class="audience-side-note">
+            <span class="orbit-mark">✳</span>
+            <p>One incident.<br /><b>Shared understanding.</b></p>
+            <span class="item-index">DESIGNED FOR THE WHOLE RESPONSE TEAM</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section journey-section" id="how">
+        <div class="journey-heading">
+          <div>
+            <p class="section-index">04 <span>/</span> HOW AN INVESTIGATION MOVES</p>
+            <h2>From page<br /><em>to next step.</em></h2>
+          </div>
+          <p>
+            Follow a deliberate response loop. Select a phase to see the work that belongs there;
+            expand a step for the detail.
+          </p>
+        </div>
+        <div class="phase-tabs" role="tablist" aria-label="Filter response phases">
+          <button class="phase-tab is-active" data-filter="all" aria-pressed="true">
+            All phases <span>04</span>
+          </button>
+          <button class="phase-tab" data-filter="triage" aria-pressed="false">
+            Triage <span>01</span>
+          </button>
+          <button class="phase-tab" data-filter="investigate" aria-pressed="false">
+            Investigate <span>02</span>
+          </button>
+          <button class="phase-tab" data-filter="respond" aria-pressed="false">
+            Respond <span>01</span>
+          </button>
+        </div>
+        <ol class="journey-list">
+          <li class="journey-row" data-phase="triage">
+            <button class="journey-toggle" aria-expanded="false">
+              <span class="journey-number">01</span
+              ><span class="journey-title"
+                ><b>Frame the incident</b><small>TRIAGE · CAPTURE THE SIGNAL</small></span
+              ><span class="journey-detail">Set the scope before the search</span
+              ><span class="journey-plus">+</span>
+            </button>
+            <div class="journey-panel">
+              <p>
+                Bring the alert, affected services, and first symptoms into one working view. Start
+                from the incident as it was reported; preserve the original signal as the
+                investigation evolves.
+              </p>
+              <div class="detail-tags">
+                <span>INCIDENT CONTEXT</span><span>AFFECTED SERVICES</span
+                ><span>INITIAL SYMPTOMS</span>
+              </div>
+            </div>
+          </li>
+          <li class="journey-row" data-phase="investigate">
+            <button class="journey-toggle" aria-expanded="false">
+              <span class="journey-number">02</span
+              ><span class="journey-title"
+                ><b>Build likely explanations</b><small>INVESTIGATE · FORM HYPOTHESES</small></span
+              ><span class="journey-detail">Keep alternatives in view</span
+              ><span class="journey-plus">+</span>
+            </button>
+            <div class="journey-panel">
+              <p>
+                Generate plausible causes from symptoms, service context, and known operational
+                history. Keep more than one explanation alive until evidence strengthens or weakens
+                it.
+              </p>
+              <div class="detail-tags">
+                <span>HYPOTHESES</span><span>CONFIDENCE</span><span>ALTERNATIVES</span>
+              </div>
+            </div>
+          </li>
+          <li class="journey-row" data-phase="investigate">
+            <button class="journey-toggle" aria-expanded="false">
+              <span class="journey-number">03</span
+              ><span class="journey-title"
+                ><b>Test with targeted evidence</b
+                ><small>INVESTIGATE · QUERY AND COMPARE</small></span
+              ><span class="journey-detail">Connect findings to sources</span
+              ><span class="journey-plus">+</span>
+            </button>
+            <div class="journey-panel">
+              <p>
+                Ask focused questions across the tools available to your environment. Compare the
+                results, follow strong signals deeper, and keep source details attached to findings.
+              </p>
+              <div class="detail-tags">
+                <span>TELEMETRY</span><span>DEPENDENCIES</span><span>RUNBOOKS</span>
+              </div>
+            </div>
+          </li>
+          <li class="journey-row" data-phase="respond">
+            <button class="journey-toggle" aria-expanded="false">
+              <span class="journey-number">04</span
+              ><span class="journey-title"
+                ><b>Conclude and plan the response</b
+                ><small>RESPOND · SHARE THE NEXT STEP</small></span
+              ><span class="journey-detail">Make recommendations reviewable</span
+              ><span class="journey-plus">+</span>
+            </button>
+            <div class="journey-panel">
+              <p>
+                Summarize the most likely cause with its supporting evidence, remaining unknowns,
+                and a proposed remediation path that responders can review.
+              </p>
+              <div class="detail-tags">
+                <span>ROOT CAUSE</span><span>REMEDIATION PLAN</span><span>REVIEW</span>
+              </div>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="signals-section">
+        <div class="section-shell">
+          <div class="signals-heading">
+            <div>
+              <p class="section-index">05 <span>/</span> THE SIGNALS</p>
+              <h2>Bring the systems<br />into the same room.</h2>
+            </div>
+            <p>
+              Incident context gets more useful when it can draw from the tools and knowledge your
+              responders already use.
+            </p>
+          </div>
+          <div class="signal-grid">
+            <article class="signal-card signal-incident">
+              <span class="signal-glyph">↗</span>
+              <div>
+                <small>INCIDENT SOURCES</small>
+                <h3>PagerDuty <span>·</span> OpsGenie</h3>
+              </div>
+              <span class="signal-arrow">↗</span>
+            </article>
+            <article class="signal-card signal-infra">
+              <span class="signal-glyph">⌘</span>
+              <div>
+                <small>INFRASTRUCTURE</small>
+                <h3>AWS <span>·</span> Kubernetes</h3>
+              </div>
+              <span class="signal-arrow">↗</span>
+            </article>
+            <article class="signal-card signal-observe">
+              <span class="signal-glyph">⌁</span>
+              <div>
+                <small>OBSERVABILITY</small>
+                <h3>Metrics <span>·</span> Logs</h3>
+              </div>
+              <span class="signal-arrow">↗</span>
+            </article>
+            <article class="signal-card signal-knowledge">
+              <span class="signal-glyph">▤</span>
+              <div>
+                <small>OPERATIONAL MEMORY</small>
+                <h3>Runbooks <span>·</span> Postmortems</h3>
+              </div>
+              <span class="signal-arrow">↗</span>
+            </article>
+          </div>
+          <p class="signal-footnote">
+            Available integrations depend on your configured providers and tools.
+          </p>
+        </div>
+      </section>
+
+      <section class="map-section section-shell" aria-labelledby="map-title">
+        <div class="map-copy">
+          <p class="section-index">06 <span>/</span> SYSTEM CONTEXT</p>
+          <h2 id="map-title">The path matters<br /><em>as much as the page.</em></h2>
+          <p>
+            Trace a service through its dependencies. See where an incident could travel, and which
+            systems deserve a closer look.
+          </p>
+          <a class="text-link" href="#how">Explore the platform <span>↗</span></a>
+        </div>
+        <div class="map-card" aria-label="Illustrative service dependency map">
+          <div class="map-card-head">
+            <span>SERVICE RELATIONSHIPS</span
+            ><span class="map-label"><i></i> ILLUSTRATIVE VIEW</span>
+          </div>
+          <svg
+            class="service-map"
+            viewBox="0 0 640 340"
+            role="img"
+            aria-label="Illustrative graph linking an API to a queue, cache, and database"
+          >
+            <defs>
+              <linearGradient id="edge-gradient" x1="0" x2="1">
+                <stop stop-color="#a7b9ea" />
+                <stop offset="1" stop-color="#d8dfed" />
+              </linearGradient>
+              <filter id="node-shadow" x="-50%" y="-50%" width="200%" height="200%">
+                <feDropShadow
+                  dx="0"
+                  dy="9"
+                  stdDeviation="10"
+                  flood-color="#354a80"
+                  flood-opacity=".13"
+                />
+              </filter>
+            </defs>
+            <path
+              d="M190 164 324 85M190 178 325 250M365 88 474 144M365 247 474 170"
+              class="map-edge"
+            />
+            <path d="M191 171 475 157" class="map-edge map-edge-soft" />
+            <circle cx="155" cy="170" r="65" class="map-halo" />
+            <g filter="url(#node-shadow)">
+              <rect x="92" y="135" width="126" height="70" rx="16" class="map-node map-node-main" />
+              <rect x="295" y="55" width="112" height="62" rx="14" class="map-node" />
+              <rect x="295" y="218" width="112" height="62" rx="14" class="map-node" />
+              <rect x="453" y="126" width="112" height="62" rx="14" class="map-node" />
+            </g>
+            <text x="155" y="165" class="map-node-label map-node-label-main">CHECKOUT API</text>
+            <text x="155" y="184" class="map-node-meta map-node-meta-main">AFFECTED SERVICE</text>
+            <text x="351" y="82" class="map-node-label">REDIS</text>
+            <text x="351" y="100" class="map-node-meta">CACHE</text>
+            <text x="351" y="245" class="map-node-label">PAYMENTS DB</text>
+            <text x="351" y="263" class="map-node-meta">DATABASE</text>
+            <text x="509" y="153" class="map-node-label">ORDER QUEUE</text>
+            <text x="509" y="171" class="map-node-meta">DEPENDENCY</text>
+            <circle cx="239" cy="116" r="4" class="map-signal" />
+            <circle cx="237" cy="223" r="4" class="map-signal map-signal-two" />
+          </svg>
+          <div class="map-card-foot">
+            <span><i class="legend-affected"></i> AFFECTED SERVICE</span
+            ><span><i class="legend-dependency"></i> DEPENDENCY</span
+            ><span>DETAILS STAY LINKED TO EVIDENCE</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="faq-section">
+        <div class="section-shell faq-shell">
+          <div class="faq-title">
+            <p class="section-index">07 <span>/</span> GOOD TO KNOW</p>
+            <h2>On your mind.</h2>
+            <p>A few quick answers about the TraceMind approach.</p>
+            <a class="text-link" href="docs.html">Read the documentation <span>↗</span></a>
+          </div>
+          <div class="faq-list">
+            <details>
+              <summary>What is TraceMind? <span>+</span></summary>
+              <p>
+                TraceMind is an incident response workspace designed to help teams investigate
+                operational issues with hypotheses, evidence, service context, and runbook-aware
+                guidance.
+              </p>
+            </details>
+            <details>
+              <summary>Does it make changes to production? <span>+</span></summary>
+              <p>
+                Investigation and remediation planning are distinct. Proposed steps can be reviewed,
+                and execution behavior depends on the configured workflow and tools.
+              </p>
+            </details>
+            <details>
+              <summary>What systems can it connect to? <span>+</span></summary>
+              <p>
+                Current project integrations include AWS and Kubernetes tooling, incident sources
+                such as PagerDuty and OpsGenie, Slack workflows, and knowledge sources. Availability
+                depends on configuration.
+              </p>
+            </details>
+            <details>
+              <summary>Can I try it without connecting production systems? <span>+</span></summary>
+              <p>
+                Yes. The guided terminal demo runs a simulated investigation and does not require
+                provider credentials.
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="launch-band" id="launch">
+        <canvas class="band-field" aria-hidden="true"></canvas>
+        <div class="band-content">
+          <span class="band-mark">✳</span>
+          <p class="section-index">TRACEMIND / INCIDENT INTELLIGENCE</p>
+          <h2>Follow the signal.<br /><em>Find your way forward.</em></h2>
+          <p class="band-copy">
+            Take a closer look at the project, explore the documentation, or try the demo
+            investigation.
+          </p>
+          <div class="band-actions">
+            <a class="button button-lime" href="http://localhost:3000/admin">Open TraceMind dashboard <span>↗</span></a
+            ><a
+              class="button button-band-quiet"
+              href="https://github.com/Runbook-Agent/RunbookAI"
+              target="_blank"
+              rel="noreferrer"
+              >Explore the project <span>↗</span></a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a class="brand footer-brand" href="#top"
+        ><span class="brand-mark">T<i></i></span><span>TraceMind</span></a
+      >
+      <p>Make the path to root cause visible.</p>
+      <div class="footer-links">
+        <a href="docs.html">Docs</a><a href="security.html">Safety</a
+        ><a href="#top">Project home</a>
+      </div>
+      <small
+        >Design adapted from
+        <a
+          href="https://21st.dev/@kedhareswer/templates/event-landing-page-template"
+          target="_blank"
+          rel="noreferrer"
+          >Kedhareswer’s Event Landing Page Template on 21st.dev</a
+        >.</small
+      >
+    </footer>
+    <script src="launch.js"></script>
+  </body>
+</html>
