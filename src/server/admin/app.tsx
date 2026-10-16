@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
 import { AdminApi } from './api';
 import { Layout } from './components/Layout';
@@ -69,23 +69,49 @@ function renderPage(route: ReturnType<typeof parseHash>, api: AdminApi): React.R
   }
 }
 
-function Auth0LoginScreen() {
+function Auth0LoginScreen({ authError }: { authError?: Error }) {
   const { loginWithRedirect } = useAuth0();
+  const [redirectError, setRedirectError] = useState<Error | null>(null);
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (authError || started.current) return;
+    started.current = true;
+    const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    void loginWithRedirect({ appState: { returnTo } }).catch((reason: unknown) => {
+      started.current = false;
+      setRedirectError(
+        reason instanceof Error ? reason : new Error('Could not start Auth0 sign-in'),
+      );
+    });
+  }, [authError, loginWithRedirect]);
+
+  const error = authError ?? redirectError;
+  if (error) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <h1 className="login-title">Sign-in could not start</h1>
+          <p className="login-subtitle">{error.message}</p>
+          <button
+            className="btn btn-primary"
+            style={{ width: '100%', marginTop: 12 }}
+            onClick={() => window.location.assign(`${window.location.origin}/admin`)}
+          >
+            Try sign-in again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="login-screen">
       <div className="login-card">
         <h1 className="login-title">TraceMind</h1>
-        <p className="login-subtitle">Sign in to open your incident intelligence dashboard.</p>
-        <p className="auth-login-options">
-          Continue with Google or use email and password on Auth0’s secure sign-in page.
+        <p className="login-subtitle" role="status" aria-live="polite">
+          Redirecting to secure sign-in…
         </p>
-        <button
-          className="btn btn-primary"
-          style={{ width: '100%', marginTop: 12 }}
-          onClick={() => void loginWithRedirect()}
-        >
-          Continue to sign in
-        </button>
       </div>
     </div>
   );
@@ -135,10 +161,8 @@ function AuthenticatedApp({ config }: { config: AuthConfig }) {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [handleHashChange]);
   if (isLoading) return <div className="loading">Checking sign-in…</div>;
-  if (!isAuthenticated) {
-    return <Auth0LoginScreen />;
-  }
-  if (error) return <div className="error-banner">Sign-in error: {error.message}</div>;
+  if (error) return <Auth0LoginScreen authError={error} />;
+  if (!isAuthenticated) return <Auth0LoginScreen />;
   const api = new AdminApi(async () => {
     const token = await getAccessTokenSilently({
       authorizationParams: { audience: config.audience },
