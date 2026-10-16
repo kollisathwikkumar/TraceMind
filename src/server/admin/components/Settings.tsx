@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { AdminApi, ProviderKeyStatus } from '../api';
 
 export function Settings({ api }: { api: AdminApi }) {
@@ -10,7 +10,7 @@ export function Settings({ api }: { api: AdminApi }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
@@ -20,13 +20,11 @@ export function Settings({ api }: { api: AdminApi }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [api]);
 
   useEffect(() => {
     void refresh();
-    // The API object is stable for a signed-in session.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refresh]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();

@@ -1,5 +1,6 @@
-# Deploy static docs site to GitHub Pages
-name: Deploy docs to Pages
+# Validate the static docs site on every push. Publishing is opt-in because
+# GitHub Pages may not be enabled for this repository/account.
+name: Docs site
 
 on:
   push:
@@ -16,7 +17,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check landing page assets
+        run: |
+          test -s docs/launch.html
+          test -s docs/launch.css
+          test -s docs/launch.js
+
   deploy:
+    name: Deploy to Pages
+    if: vars.PAGES_DEPLOY_ENABLED == 'true'
+    needs: validate
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
