@@ -13,6 +13,7 @@ import { GraphEvidence } from './components/GraphEvidence';
 import { Remediations } from './components/Remediations';
 import { EvaluationAnalyticsPage } from './components/EvaluationAnalytics';
 import { Settings } from './components/Settings';
+import { safeAuthReturnTarget } from './auth-routing';
 
 interface AuthConfig {
   enabled: boolean;
@@ -81,7 +82,7 @@ function Auth0LoginScreen({ authError }: { authError?: Error }) {
     void loginWithRedirect({ appState: { returnTo } }).catch((reason: unknown) => {
       started.current = false;
       setRedirectError(
-        reason instanceof Error ? reason : new Error('Could not start Auth0 sign-in'),
+        reason instanceof Error ? reason : new Error('Could not start Auth0 sign-in')
       );
     });
   }, [authError, loginWithRedirect]);
@@ -112,6 +113,33 @@ function Auth0LoginScreen({ authError }: { authError?: Error }) {
         <p className="login-subtitle" role="status" aria-live="polite">
           Redirecting to secure sign-in…
         </p>
+      </div>
+    </div>
+  );
+}
+
+function AuthInitializationScreen() {
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setTimedOut(true), 12_000);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  if (!timedOut) return <div className="loading">Checking sign-in…</div>;
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <h1 className="login-title">Sign-in is taking longer than expected</h1>
+        <p className="login-subtitle">
+          The secure identity check has not finished yet. Retry to restart sign-in.
+        </p>
+        <button
+          className="btn btn-primary"
+          style={{ width: '100%', marginTop: 12 }}
+          onClick={() => window.location.assign(`${window.location.origin}/admin`)}
+        >
+          Retry sign-in
+        </button>
       </div>
     </div>
   );
@@ -160,7 +188,7 @@ function AuthenticatedApp({ config }: { config: AuthConfig }) {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [handleHashChange]);
-  if (isLoading) return <div className="loading">Checking sign-in…</div>;
+  if (isLoading) return <AuthInitializationScreen />;
   if (error) return <Auth0LoginScreen authError={error} />;
   if (!isAuthenticated) return <Auth0LoginScreen />;
   const api = new AdminApi(async () => {
@@ -226,7 +254,13 @@ export function App() {
       }}
       onRedirectCallback={(appState) => {
         const returnTo = (appState as { returnTo?: string } | undefined)?.returnTo;
-        if (returnTo) window.location.assign(returnTo);
+        const target = safeAuthReturnTarget(returnTo, window.location.origin);
+        if (!target) return;
+        const previousHash = window.location.hash;
+        window.history.replaceState(window.history.state, '', target);
+        if (new URL(target, window.location.origin).hash !== previousHash) {
+          window.dispatchEvent(new Event('hashchange'));
+        }
       }}
     >
       <AuthenticatedApp config={config} />

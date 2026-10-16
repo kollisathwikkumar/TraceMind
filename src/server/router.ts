@@ -99,7 +99,7 @@ export function createRouter(routerConfig: RouterConfig) {
         : undefined;
     res.setHeader(
       'Content-Security-Policy',
-      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
     );
     if (method === 'OPTIONS' && cors.enabled) {
       res.writeHead(204);

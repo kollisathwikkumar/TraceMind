@@ -99,9 +99,13 @@ describe('incident API', () => {
     expect(admin.headers.get('content-security-policy')).toContain(
       "connect-src 'self' https://tenant.example.auth0.com;"
     );
+    expect(admin.headers.get('content-security-policy')).toContain(
+      "frame-src 'self' https://tenant.example.auth0.com;"
+    );
 
     const api = await fetch(`${base}/api/v1/auth/config`);
     expect(api.headers.get('content-security-policy')).toContain("connect-src 'self';");
+    expect(api.headers.get('content-security-policy')).toContain("frame-src 'self';");
     expect(api.headers.get('content-security-policy')).not.toContain('tenant.example.auth0.com');
   });
 
