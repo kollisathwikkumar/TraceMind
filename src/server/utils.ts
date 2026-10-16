@@ -113,7 +113,11 @@ export async function serveAdminFile(path: string, res: ServerResponse): Promise
 
   const fullPath = resolve(adminDir, filePath);
   const pathFromRoot = relative(adminDir, fullPath);
-  if (isAbsolute(pathFromRoot) || pathFromRoot === '..' || pathFromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
+  if (
+    isAbsolute(pathFromRoot) ||
+    pathFromRoot === '..' ||
+    pathFromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+  ) {
     sendJson(res, 404, { error: { code: 'not_found', message: 'Admin asset not found' } });
     return;
   }
@@ -144,6 +148,36 @@ export async function serveAdminFile(path: string, res: ServerResponse): Promise
     'Content-Length': content.length,
     // These admin asset filenames are stable (index.js/index.css), not content-hashed.
     // Revalidate them so a server update cannot leave the browser running stale auth code.
+    'Cache-Control': 'no-cache',
+  });
+  res.end(content);
+}
+
+/** Serve the public TraceMind launch page and its two static assets. */
+export async function serveLaunchFile(path: string, res: ServerResponse): Promise<void> {
+  const assets: Record<string, string> = {
+    '/': 'launch.html',
+    '/launch.html': 'launch.html',
+    '/launch.css': 'launch.css',
+    '/launch.js': 'launch.js',
+  };
+  const asset = assets[path];
+  if (!asset) {
+    sendJson(res, 404, { error: { code: 'not_found', message: 'Launch asset not found' } });
+    return;
+  }
+
+  const launchDir = resolve(process.cwd(), 'docs');
+  const fullPath = resolve(launchDir, asset);
+  if (!existsSync(fullPath)) {
+    sendJson(res, 404, { error: { code: 'not_found', message: 'Launch page assets not found' } });
+    return;
+  }
+
+  const content = readFileSync(fullPath);
+  res.writeHead(200, {
+    'Content-Type': MIME_TYPES[extname(fullPath)] || 'application/octet-stream',
+    'Content-Length': content.length,
     'Cache-Control': 'no-cache',
   });
   res.end(content);

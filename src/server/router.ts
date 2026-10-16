@@ -29,6 +29,7 @@ import {
   RequestBodyTooLargeError,
   sendJson,
   serveAdminFile,
+  serveLaunchFile,
 } from './utils';
 
 export interface RouterConfig {
@@ -492,6 +493,17 @@ export function createRouter(routerConfig: RouterConfig) {
         });
         return;
       }
+    }
+
+    // Public product launch page and assets.
+    if (
+      path === '/' ||
+      path === '/launch.html' ||
+      path === '/launch.css' ||
+      path === '/launch.js'
+    ) {
+      await serveLaunchFile(path, res);
+      return;
     }
 
     // Admin UI — serve static files from admin-dist

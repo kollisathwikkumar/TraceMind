@@ -58,6 +58,20 @@ afterEach(async () => {
 });
 
 describe('incident API', () => {
+  it('serves the public launch page from the service root with dashboard links', async () => {
+    const base = await startApi();
+    const home = await fetch(base);
+    expect(home.status).toBe(200);
+    expect(home.headers.get('content-type')).toContain('text/html');
+    expect(await home.text()).toContain('Open TraceMind dashboard');
+
+    const style = await fetch(`${base}/launch.css`);
+    expect(style.status).toBe(200);
+    expect(style.headers.get('content-type')).toContain('text/css');
+    const script = await fetch(`${base}/launch.js`);
+    expect(script.status).toBe(200);
+  });
+
   it('serves admin bundles with revalidation so browsers do not pin stale auth code', async () => {
     const base = await startApi();
     const html = await fetch(`${base}/admin`);
@@ -103,28 +117,71 @@ describe('incident API', () => {
   it('publishes Auth0 browser settings and scopes provider-key operations to verified subjects', async () => {
     const saved = new Map<string, { provider: string; apiKey: string }>();
     const base = await startApi(DEFAULT_CONFIG, undefined, {
-      auth0Config: { domain: 'tenant.example.auth0.com', clientId: 'public-client', audience: 'https://api.example.test', issuer: 'https://tenant.example.auth0.com/' },
-      verifyAuth0Token: async (token: string) => token === 'alice-token' ? { sub: 'auth0|alice' } : undefined,
+      auth0Config: {
+        domain: 'tenant.example.auth0.com',
+        clientId: 'public-client',
+        audience: 'https://api.example.test',
+        issuer: 'https://tenant.example.auth0.com/',
+      },
+      verifyAuth0Token: async (token: string) =>
+        token === 'alice-token' ? { sub: 'auth0|alice' } : undefined,
       providerKeyStore: {
-        getStatus: async (subject: string) => saved.has(subject) ? { configured: true, provider: saved.get(subject)!.provider, updatedAt: '2026-10-17T00:00:00.000Z' } : { configured: false },
-        save: async (subject: string, provider: string, apiKey: string) => { saved.set(subject, { provider, apiKey }); },
-        delete: async (subject: string) => { saved.delete(subject); },
+        getStatus: async (subject: string) =>
+          saved.has(subject)
+            ? {
+                configured: true,
+                provider: saved.get(subject)!.provider,
+                updatedAt: '2026-10-17T00:00:00.000Z',
+              }
+            : { configured: false },
+        save: async (subject: string, provider: string, apiKey: string) => {
+          saved.set(subject, { provider, apiKey });
+        },
+        delete: async (subject: string) => {
+          saved.delete(subject);
+        },
         getDecrypted: async (subject: string) => saved.get(subject),
       },
     });
-    expect(await (await fetch(`${base}/api/v1/auth/config`)).json()).toMatchObject({ data: { enabled: true, clientId: 'public-client' } });
-    expect((await fetch(`${base}/api/v1/settings/provider-key`, { headers: { Authorization: 'Bearer test-key' } })).status).toBe(401);
+    expect(await (await fetch(`${base}/api/v1/auth/config`)).json()).toMatchObject({
+      data: { enabled: true, clientId: 'public-client' },
+    });
+    expect(
+      (
+        await fetch(`${base}/api/v1/settings/provider-key`, {
+          headers: { Authorization: 'Bearer test-key' },
+        })
+      ).status
+    ).toBe(401);
     const headers = { Authorization: 'Bearer alice-token', 'Content-Type': 'application/json' };
-    const put = await fetch(`${base}/api/v1/settings/provider-key`, { method: 'PUT', headers, body: JSON.stringify({ provider: 'openai', apiKey: 'secret-provider-key' }) });
+    const put = await fetch(`${base}/api/v1/settings/provider-key`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ provider: 'openai', apiKey: 'secret-provider-key' }),
+    });
     expect(put.status).toBe(200);
     expect(await put.text()).not.toContain('secret-provider-key');
     expect(saved.get('auth0|alice')?.apiKey).toBe('secret-provider-key');
-    expect((await fetch(`${base}/api/v1/settings/provider-key`, { headers: { Authorization: 'Bearer alice-token' } })).status).toBe(200);
-    expect((await fetch(`${base}/api/v1/settings/provider-key`, { headers: { Authorization: 'Bearer stranger-token' } })).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/api/v1/settings/provider-key`, {
+          headers: { Authorization: 'Bearer alice-token' },
+        })
+      ).status
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/api/v1/settings/provider-key`, {
+          headers: { Authorization: 'Bearer stranger-token' },
+        })
+      ).status
+    ).toBe(401);
   });
 
   it('requires admin authentication before testing the configured LLM', async () => {
-    const validateLLM = vi.fn().mockResolvedValue({ content: 'TraceMind model connection successful.' });
+    const validateLLM = vi
+      .fn()
+      .mockResolvedValue({ content: 'TraceMind model connection successful.' });
     const base = await startApi(DEFAULT_CONFIG, validateLLM);
 
     const rejected = await fetch(`${base}/api/v1/llm/validate`, { method: 'POST' });
@@ -225,7 +282,6 @@ describe('incident API', () => {
     expect(
       ((await events.json()) as { data: { action: string }[] }).data.map((e) => e.action)
     ).toContain('status_changed');
-
   });
 
   it('validates create and update fields', async () => {
