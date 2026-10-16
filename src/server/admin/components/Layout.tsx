@@ -96,7 +96,14 @@ export function Layout({
                     onClick={() => setOpenGroup(openGroup === group.title ? null : group.title)}
                   >
                     {group.title}
-                    <span aria-hidden="true">⌄</span>
+                    <svg
+                      className="nav-chevron"
+                      aria-hidden="true"
+                      viewBox="0 0 12 12"
+                      focusable="false"
+                    >
+                      <path d="m3 4.5 3 3 3-3" />
+                    </svg>
                   </button>
                   <div className="nav-dropdown" id={menuId} aria-label={`${group.title} pages`}>
                     {group.items.map((item) => (
@@ -139,12 +146,17 @@ export function Layout({
             </span>
             {onLogout && (
               <button
-                className="icon-button"
+                type="button"
+                className="signout-button"
                 onClick={onLogout}
                 title="Sign out"
                 aria-label="Sign out"
               >
-                ↗
+                <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
+                  <path d="M6.5 2.5h-3A1.5 1.5 0 0 0 2 4v8a1.5 1.5 0 0 0 1.5 1.5h3" />
+                  <path d="M8 11.5 11.5 8 8 4.5M11 8H5.5" />
+                </svg>
+                <span>Sign out</span>
               </button>
             )}
           </div>

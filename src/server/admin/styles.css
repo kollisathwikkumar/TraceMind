@@ -3216,9 +3216,22 @@ textarea:focus {
     background 0.16s ease,
     color 0.16s ease;
 }
-.nav-menu-trigger > span {
+.nav-menu-trigger .nav-chevron {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
   color: #929aaa;
-  font-size: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  display: block;
+  overflow: visible;
+  transition: transform 0.16s ease;
+}
+.nav-menu.is-open .nav-menu-trigger .nav-chevron {
+  transform: rotate(180deg);
 }
 .nav-menu:hover > .nav-menu-trigger,
 .nav-menu:focus-within > .nav-menu-trigger,
@@ -3299,6 +3312,45 @@ textarea:focus {
   flex: 0 0 30px;
   height: 30px;
   border-radius: 7px;
+}
+.signout-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 11px;
+  flex: 0 0 auto;
+  border: 1px solid #dbe3f0;
+  border-radius: 7px;
+  background: #fff;
+  color: #52627b;
+  font: 600 10px var(--sans);
+  white-space: nowrap;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+.signout-button:hover,
+.signout-button:focus-visible {
+  color: #204fae;
+  border-color: #b9c9ed;
+  background: #f6f8ff;
+}
+.signout-button:focus-visible {
+  outline: 2px solid #7aa0f8;
+  outline-offset: 2px;
+}
+.signout-button svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 @media (max-width: 1120px) {
   .topbar {
