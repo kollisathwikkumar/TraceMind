@@ -13,7 +13,15 @@ import { fileURLToPath } from 'url';
 export interface ApiEnvelope<T = unknown> {
   data?: T;
   error?: { code: string; message: string };
-  meta?: { durationMs?: number; provenance?: string };
+  meta?: {
+    durationMs?: number;
+    provenance?: string;
+    graphProjection?: {
+      status: 'queued' | 'applied' | 'failed' | 'partial';
+      requestedServiceIds: string[];
+      linkedServiceIds: string[];
+    };
+  };
 }
 
 export function sendJson<T>(res: ServerResponse, status: number, body: ApiEnvelope<T>): void {

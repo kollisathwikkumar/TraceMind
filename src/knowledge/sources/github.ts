@@ -5,8 +5,8 @@
  * Uses the Git Tree + Blob APIs for efficient recursive file retrieval.
  */
 
-import matter from 'gray-matter';
 import { parse as parseYaml } from 'yaml';
+import { parseFrontMatter } from '../../utils/frontmatter';
 import type {
   KnowledgeChunk,
   KnowledgeDocument,
@@ -200,8 +200,8 @@ function parseDocumentFromBlob(input: {
   const lower = input.path.toLowerCase();
 
   if (lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.txt')) {
-    const parsed = matter(input.content);
-    const frontmatter = parsed.data as Record<string, unknown>;
+    const parsed = parseFrontMatter(input.content);
+    const frontmatter = parsed.data;
     const body = parsed.content.trim();
     if (!body) {
       return null;

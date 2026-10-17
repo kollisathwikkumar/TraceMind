@@ -14,12 +14,14 @@ import { Agent } from './agent/agent';
 import { createLLMClient } from './model/llm';
 import { toolRegistry } from './tools/registry';
 import { loadConfig, validateConfig } from './utils/config';
+import { parseFrontMatter } from './utils/frontmatter';
 import { quickSetup, loadServiceConfig, ONBOARDING_PROMPTS } from './config/onboarding';
 import { SetupWizard } from './cli/setup-wizard';
 import { ChatInterface } from './cli/chat';
 import { MarkdownText } from './cli/components/markdown';
 import { createConfiguredRetriever } from './knowledge/retriever';
 import { connectFalkorDB } from './knowledge/store/falkordb-store';
+import { formatIncidentEvidencePaths, resolveGraphContextSettings } from './cli/graph-context';
 import type { AgentEvent } from './agent/types';
 import { skillRegistry } from './skills/registry';
 import { getRuntimeTools } from './cli/runtime-tools';
@@ -86,18 +88,19 @@ async function createAgentKnowledgeRetriever(config: Awaited<ReturnType<typeof l
 }
 
 function createGraphContextFetcher(config: Awaited<ReturnType<typeof loadConfig>>) {
-  const url = process.env.TRACEMIND_FALKORDB_URL || process.env.RUNBOOK_FALKORDB_URL || config.graph.falkordbUrl;
-  if (!url) return undefined;
+  const settings = resolveGraphContextSettings(config.graph);
+  if (!settings.url) return undefined;
 
   return async (context: { incidentId?: string; query: string }): Promise<string[]> => {
     if (!context.incidentId) return [];
-    const connection = await connectFalkorDB(url, config.graph.graphName);
+    const connection = await connectFalkorDB(settings.url!, settings.graphName);
     try {
-      const related = await connection.store.findRelatedIncidents('default', context.incidentId);
-      return related.map(
-        (incident) =>
-          `${incident.id}: ${incident.title} (shared services: ${incident.sharedServices.join(', ') || 'unknown'})`
+      const paths = await connection.store.findIncidentEvidencePaths(
+        settings.orgId,
+        context.incidentId,
+        3
       );
+      return formatIncidentEvidencePaths(paths, settings);
     } finally {
       await connection.close();
     }
@@ -1613,7 +1616,6 @@ knowledge
     const { readFile } = await import('fs/promises');
     const { join, resolve, basename, extname } = await import('path');
     const { parse: parseYaml } = await import('yaml');
-    const matter = (await import('gray-matter')).default;
 
     const filePath = resolve(file);
 
@@ -1634,10 +1636,15 @@ knowledge
       let services: string[] = [];
 
       if (ext === '.md' || ext === '.markdown') {
-        const { data: frontmatter } = matter(content);
-        title = frontmatter.title || basename(filePath, ext);
-        docType = frontmatter.type || options.type || 'runbook';
-        services = frontmatter.services || [];
+        const { data: frontmatter } = parseFrontMatter(content);
+        title =
+          (typeof frontmatter.title === 'string' ? frontmatter.title : undefined) ||
+          basename(filePath, ext);
+        docType =
+          (typeof frontmatter.type === 'string' ? frontmatter.type : undefined) ||
+          options.type ||
+          'runbook';
+        services = Array.isArray(frontmatter.services) ? frontmatter.services.map(String) : [];
       } else if (ext === '.yaml' || ext === '.yml') {
         const data = parseYaml(content);
         title = data.title || basename(filePath, ext);
@@ -2356,54 +2363,53 @@ program
   .option('--host <host>', 'Host to bind to (overrides server.host)')
   .option('--base-dir <dir>', 'Knowledge base directory', '.runbook')
   .option('--api-key <key>', 'API key for authentication')
-  .action(
-    async (options: { port?: string; host?: string; baseDir: string; apiKey?: string }) => {
-      const serverConfig = await loadConfig();
-      const apiKey = options.apiKey || process.env.TRACEMIND_SERVER_API_KEY ||
-        process.env.RUNBOOK_SERVER_API_KEY || serverConfig.server.apiKey;
+  .action(async (options: { port?: string; host?: string; baseDir: string; apiKey?: string }) => {
+    const serverConfig = await loadConfig();
+    const apiKey =
+      options.apiKey ||
+      process.env.TRACEMIND_SERVER_API_KEY ||
+      process.env.RUNBOOK_SERVER_API_KEY ||
+      serverConfig.server.apiKey;
 
-      if (!apiKey) {
-        console.error(chalk.red('Error: API key is required'));
-        console.log(
-          chalk.yellow('Set --api-key flag or TRACEMIND_SERVER_API_KEY environment variable')
-        );
-        process.exit(1);
-      }
-
-      const port = parseInt(options.port || String(serverConfig.server.port), 10);
-      const host = options.host || serverConfig.server.host;
-      if (isNaN(port) || port < 1 || port > 65535) {
-        console.error(chalk.red('Error: Invalid port number'));
-        process.exit(1);
-      }
-
-      console.log(chalk.cyan('Starting TraceMind server...'));
-      console.log(chalk.gray(`Port: ${port}`));
-      console.log(chalk.gray(`Host: ${host}`));
-      console.log(chalk.gray(`Base dir: ${options.baseDir}`));
-
-      try {
-        const { startServer } = await import('./server/index');
-        await startServer({
-          port,
-          host,
-          baseDir: options.baseDir,
-          apiKey,
-        });
-
-        console.log('');
-        console.log(chalk.green('Server is running!'));
-        console.log(chalk.yellow('Press Ctrl+C to stop'));
-      } catch (error) {
-        console.error(
-          chalk.red(
-            `Failed to start server: ${error instanceof Error ? error.message : error}`
-          )
-        );
-        process.exit(1);
-      }
+    if (!apiKey) {
+      console.error(chalk.red('Error: API key is required'));
+      console.log(
+        chalk.yellow('Set --api-key flag or TRACEMIND_SERVER_API_KEY environment variable')
+      );
+      process.exit(1);
     }
-  );
+
+    const port = parseInt(options.port || String(serverConfig.server.port), 10);
+    const host = options.host || serverConfig.server.host;
+    if (isNaN(port) || port < 1 || port > 65535) {
+      console.error(chalk.red('Error: Invalid port number'));
+      process.exit(1);
+    }
+
+    console.log(chalk.cyan('Starting TraceMind server...'));
+    console.log(chalk.gray(`Port: ${port}`));
+    console.log(chalk.gray(`Host: ${host}`));
+    console.log(chalk.gray(`Base dir: ${options.baseDir}`));
+
+    try {
+      const { startServer } = await import('./server/index');
+      await startServer({
+        port,
+        host,
+        baseDir: options.baseDir,
+        apiKey,
+      });
+
+      console.log('');
+      console.log(chalk.green('Server is running!'));
+      console.log(chalk.yellow('Press Ctrl+C to stop'));
+    } catch (error) {
+      console.error(
+        chalk.red(`Failed to start server: ${error instanceof Error ? error.message : error}`)
+      );
+      process.exit(1);
+    }
+  });
 
 // Slack events gateway command
 program

@@ -8,7 +8,8 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { join, extname, basename } from 'path';
 import { existsSync } from 'fs';
-import matter from 'gray-matter';
+import { parse as parseYamlDocument } from 'yaml';
+import { parseFrontMatter } from '../../utils/frontmatter';
 import type {
   KnowledgeDocument,
   KnowledgeChunk,
@@ -92,13 +93,19 @@ async function parseDocument(filePath: string): Promise<KnowledgeDocument | null
  * Parse a markdown file with optional frontmatter
  */
 function parseMarkdown(filePath: string, content: string): KnowledgeDocument {
-  const { data: frontmatter, content: body } = matter(content);
+  const { data: frontmatter, content: body } = parseFrontMatter(content);
 
-  const docType = (frontmatter.type as KnowledgeType) || inferType(filePath, body);
-  const title = frontmatter.title || extractTitle(body) || basename(filePath, extname(filePath));
-  const services = (frontmatter.services as string[]) || [];
-  const tags = (frontmatter.tags as string[]) || [];
-  const symptoms = (frontmatter.symptoms as string[]) || [];
+  const docType =
+    (typeof frontmatter.type === 'string' ? (frontmatter.type as KnowledgeType) : undefined) ||
+    inferType(filePath, body);
+  const title =
+    (typeof frontmatter.title === 'string' ? frontmatter.title : undefined) ||
+    extractTitle(body) ||
+    basename(filePath, extname(filePath));
+  const services = normalizeStringArray(frontmatter.services);
+  const tags = normalizeStringArray(frontmatter.tags);
+  const symptoms = normalizeStringArray(frontmatter.symptoms);
+  const severity = normalizeSeverity(frontmatter.severity);
 
   // Generate document ID from path
   const id = filePath.replace(/[^a-zA-Z0-9]/g, '_');
@@ -119,13 +126,14 @@ function parseMarkdown(filePath: string, content: string): KnowledgeDocument {
     chunks,
     services,
     tags,
-    severityRelevance: frontmatter.severity ? [frontmatter.severity] : [],
+    severityRelevance: severity ? [severity] : [],
     symptoms,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    author: frontmatter.author as string | undefined,
+    author: typeof frontmatter.author === 'string' ? frontmatter.author : undefined,
     sourceUrl: `file://${filePath}`,
-    lastValidated: frontmatter.lastValidated as string | undefined,
+    lastValidated:
+      typeof frontmatter.lastValidated === 'string' ? frontmatter.lastValidated : undefined,
   };
 }
 
@@ -133,10 +141,15 @@ function parseMarkdown(filePath: string, content: string): KnowledgeDocument {
  * Parse a YAML file (for structured data like service ownership)
  */
 function parseYaml(filePath: string, content: string): KnowledgeDocument {
-  const { data } = matter(`---\n${content}\n---\n`);
+  const parsed: unknown = parseYamlDocument(content, { maxAliasCount: 50 });
+  const data = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
 
   const id = filePath.replace(/[^a-zA-Z0-9]/g, '_');
-  const title = data.title || basename(filePath, extname(filePath));
+  const title =
+    (typeof data.title === 'string' ? data.title : undefined) ||
+    basename(filePath, extname(filePath));
 
   return {
     id,
@@ -145,7 +158,7 @@ function parseYaml(filePath: string, content: string): KnowledgeDocument {
       name: 'local',
       config: { type: 'filesystem', path: filePath, filePatterns: [] },
     },
-    type: (data.type as KnowledgeType) || 'environment',
+    type: (typeof data.type === 'string' ? data.type as KnowledgeType : undefined) || 'environment',
     title,
     content: JSON.stringify(data, null, 2),
     chunks: [
@@ -156,8 +169,8 @@ function parseYaml(filePath: string, content: string): KnowledgeDocument {
         chunkType: 'reference',
       },
     ],
-    services: data.services || [],
-    tags: data.tags || [],
+    services: normalizeStringArray(data.services),
+    tags: normalizeStringArray(data.tags),
     severityRelevance: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -198,6 +211,14 @@ function inferType(filePath: string, content: string): KnowledgeType {
 function extractTitle(content: string): string | null {
   const match = content.match(/^#\s+(.+)$/m);
   return match ? match[1].trim() : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function normalizeSeverity(value: unknown): 'sev1' | 'sev2' | 'sev3' | undefined {
+  return value === 'sev1' || value === 'sev2' || value === 'sev3' ? value : undefined;
 }
 
 /**

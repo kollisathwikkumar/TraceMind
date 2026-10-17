@@ -126,6 +126,10 @@ Set the Auth0 SPA callback, logout URL, and allowed web origin to the dashboard 
 
 Do not commit `.env` files, API keys, database credentials, or production data.
 
+### FalkorDB hackathon path
+
+TraceMind’s strongest FalkorDB fit is **Track 1: Agents That Act on Connected Data**: the investigation CLI can use bounded, tenant-scoped FalkorDB paths as cited topology evidence rather than treating the graph as a passive visualization. The graph stores services, dependency relationships, and incident-to-service links; it does not independently prove causation. See the [FalkorDB hackathon readiness audit](docs/FALKORDB_HACKATHON_READINESS.md) for the current implementation map, local integration-test steps, demo flow, and remaining gaps.
+
 ## Use the dashboard
 
 1. Start the server and open `/admin`.

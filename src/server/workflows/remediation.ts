@@ -1,20 +1,27 @@
 import type { RemediationStep, WorkflowRepository } from './store';
+import { randomUUID } from 'crypto';
 
 export interface RemediationExecutor {
   execute(
     actionId: string,
-    context: { incidentId: string; planId: string; stepId: string }
+    context: RemediationContext
   ): Promise<{ succeeded: boolean; output?: string; error?: string }>;
   verify(
     checkId: string,
-    context: { incidentId: string; planId: string; stepId: string }
+    context: RemediationContext
   ): Promise<{ succeeded: boolean; evidence?: string; error?: string }>;
   rollback(
     actionId: string,
-    context: { incidentId: string; planId: string; stepId: string }
+    context: RemediationContext
   ): Promise<{ succeeded: boolean; output?: string; error?: string }>;
 }
-type RemediationContext = { incidentId: string; planId: string; stepId: string };
+export type RemediationContext = {
+  incidentId: string;
+  planId: string;
+  stepId: string;
+  /** Stable across retries of a single logical broker operation. */
+  idempotencyKey: string;
+};
 type ActionHandler = (
   context: RemediationContext
 ) => Promise<{ succeeded: boolean; output?: string; error?: string }>;
@@ -29,16 +36,16 @@ export class RegisteredRemediationExecutor implements RemediationExecutor {
     private readonly checks: Readonly<Record<string, CheckHandler>>,
     private readonly rollbacks: Readonly<Record<string, ActionHandler>>
   ) {}
-  execute(actionId: string, context: { incidentId: string; planId: string; stepId: string }) {
+  execute(actionId: string, context: RemediationContext) {
     return this.action(actionId)(context);
   }
-  verify(checkId: string, context: { incidentId: string; planId: string; stepId: string }) {
+  verify(checkId: string, context: RemediationContext) {
     const check = this.checks[checkId];
     if (!Object.hasOwn(this.checks, checkId) || typeof check !== 'function')
       throw new Error('Post-check identifier is not registered');
     return check(context);
   }
-  rollback(actionId: string, context: { incidentId: string; planId: string; stepId: string }) {
+  rollback(actionId: string, context: RemediationContext) {
     const rollback = this.rollbacks[actionId];
     if (!Object.hasOwn(this.rollbacks, actionId) || typeof rollback !== 'function')
       throw new Error('Rollback identifier is not registered');
@@ -66,47 +73,92 @@ export class RemediationWorkflow {
     private readonly executor?: RemediationExecutor
   ) {}
 
-  async execute(planId: string, stepId: string, actor: string): Promise<RemediationResult> {
+  async execute(
+    planId: string,
+    stepId: string,
+    actor: string,
+    tenantId = 'default'
+  ): Promise<RemediationResult> {
     if (!this.executor) throw new Error('No controlled remediation executor is configured');
-    const plan = await this.store.getPlan(planId);
+    const plan = await this.store.getPlan(planId, tenantId);
     const step = plan?.steps.find((item) => item.id === stepId);
     if (!plan || !step) throw new Error('Remediation step not found');
-    if (step.status !== 'approved' || !(await this.store.beginExecution(planId, stepId, actor)))
+    const leaseToken = randomUUID();
+    if (
+      step.status !== 'approved' ||
+      !(await this.store.beginExecution(planId, stepId, actor, leaseToken, tenantId))
+    )
       throw new Error('Remediation step requires approval before execution');
-    const context = { incidentId: plan.incidentId, planId, stepId };
+    const context: RemediationContext = {
+      incidentId: plan.incidentId,
+      planId,
+      stepId,
+      idempotencyKey: `${planId}:${stepId}:execute`,
+    };
     let execution: RemediationStep['executionResult'];
+    let outcomeUnknown = false;
     try {
       execution = boundResult(await this.executor.execute(step.actionId, context));
     } catch (error) {
-      execution = { succeeded: false, error: message(error) };
+      // A lost response does not prove the broker did not perform the action.
+      // Keep the step out of rollback-eligible states until reconciled by key.
+      outcomeUnknown = true;
+      execution = { succeeded: false, error: `Execution outcome unknown: ${message(error)}` };
     }
     if (!execution.succeeded) {
-      await this.store.setExecution(
+      const persisted = await this.store.setExecution(
         planId,
         stepId,
-        'execution_failed',
+        outcomeUnknown ? 'execution_unknown' : 'execution_failed',
         execution,
         undefined,
-        actor
+        actor,
+        leaseToken,
+        tenantId
       );
+      if (!persisted) {
+        return { executionSucceeded: false, verificationSucceeded: null, status: 'execution_unknown' };
+      }
       return {
         executionSucceeded: false,
         verificationSucceeded: null,
-        status: 'execution_failed',
+        status: outcomeUnknown ? 'execution_unknown' : 'execution_failed',
         execution,
       };
     }
     let verification: RemediationStep['verificationResult'];
+    let verificationUnknown = false;
     try {
       verification = boundResult(await this.executor.verify(step.postCheckId, context));
     } catch (error) {
-      verification = { succeeded: false, error: message(error) };
+      verificationUnknown = true;
+      verification = { succeeded: false, error: `Verification outcome unknown: ${message(error)}` };
     }
-    const status = verification.succeeded ? 'verified' : 'verification_failed';
-    await this.store.setExecution(planId, stepId, status, execution, verification, actor);
+    const status = verificationUnknown
+      ? 'verification_unknown'
+      : verification.succeeded ? 'verified' : 'verification_failed';
+    const persisted = await this.store.setExecution(
+      planId,
+      stepId,
+      status,
+      execution,
+      verification,
+      actor,
+      leaseToken,
+      tenantId
+    );
+    if (!persisted) {
+      return {
+        executionSucceeded: true,
+        verificationSucceeded: verificationUnknown ? null : verification.succeeded,
+        status: 'execution_unknown',
+        execution,
+        verification,
+      };
+    }
     return {
       executionSucceeded: true,
-      verificationSucceeded: verification.succeeded,
+      verificationSucceeded: verificationUnknown ? null : verification.succeeded,
       status,
       execution,
       verification,
@@ -116,32 +168,37 @@ export class RemediationWorkflow {
   async rollback(
     planId: string,
     stepId: string,
-    actor: string
+    actor: string,
+    tenantId = 'default'
   ): Promise<{ status: RemediationStep['status']; result: RemediationStep['rollbackResult'] }> {
     if (!this.executor) throw new Error('No controlled remediation executor is configured');
-    const plan = await this.store.getPlan(planId);
+    const plan = await this.store.getPlan(planId, tenantId);
     const step = plan?.steps.find((item) => item.id === stepId);
     if (!plan || !step) throw new Error('Remediation step not found');
     if (!step.rollbackApproved) throw new Error('Rollback requires separate approval');
+    const leaseToken = randomUUID();
     if (
       !['verified', 'verification_failed', 'execution_succeeded'].includes(step.status) ||
-      !(await this.store.beginRollback(planId, stepId, actor))
+      !(await this.store.beginRollback(planId, stepId, actor, leaseToken, tenantId))
     )
       throw new Error('Rollback requires a completed execution and separate approval');
     let result: RemediationStep['rollbackResult'];
+    let outcomeUnknown = false;
     try {
       result = boundResult(
         await this.executor.rollback(step.rollbackActionId, {
           incidentId: plan.incidentId,
           planId,
           stepId,
+          idempotencyKey: `${planId}:${stepId}:rollback`,
         })
       );
     } catch (error) {
       result = { succeeded: false, error: message(error) };
+      outcomeUnknown = true;
     }
-    await this.store.setRollback(planId, stepId, result, actor);
-    return { status: result.succeeded ? 'rolled_back' : 'rollback_failed', result };
+    const persisted = await this.store.setRollback(planId, stepId, result, actor, leaseToken, tenantId, outcomeUnknown);
+    return { status: persisted ? (outcomeUnknown ? 'rollback_unknown' : result.succeeded ? 'rolled_back' : 'rollback_failed') : 'rollback_unknown', result };
   }
 }
 

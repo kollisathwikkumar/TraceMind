@@ -56,8 +56,96 @@ export interface IncidentEvidencePath {
 export class FalkorDBStore {
   constructor(private readonly graph: FalkorGraphPort) {}
 
+  /**
+   * Create the range indexes used by tenant-scoped graph lookups before serving
+   * requests. FalkorDB accepts a multi-property range index (v4.22.1); older
+   * deployments may already have single-property indexes, in which case we
+   * preserve them and ensure each required property remains indexed.
+   */
+  async bootstrap(): Promise<void> {
+    // GRAPH.RO_QUERY cannot operate on a graph key FalkorDB has not created yet.
+    // checkHealth initializes only that empty graph case before schema probes.
+    await this.checkHealth();
+    await this.ensureLookupIndexes();
+  }
+
+  private async ensureLookupIndexes(): Promise<void> {
+    const definitions = [
+      { label: 'Service', properties: ['org_id', 'id'] },
+      { label: 'Incident', properties: ['org_id', 'id'] },
+    ] as const;
+
+    for (const definition of definitions) {
+      let indexes = await this.getIndexes();
+      const existing = indexes
+        .filter((row) => row.label === definition.label)
+        .map((row) => row.properties);
+      if (existing.some((properties) => sameProperties(properties, definition.properties)))
+        continue;
+
+      const overlaps = existing.some((properties) =>
+        definition.properties.some((property) => properties.includes(property))
+      );
+      if (!overlaps) {
+        try {
+          await this.graph.query(`CREATE INDEX FOR (n:${definition.label}) ON (n.org_id, n.id)`);
+          continue;
+        } catch (error) {
+          // Concurrent process startup can race while adding the same index.
+          indexes = await this.getIndexes();
+          const created = indexes
+            .filter((row) => row.label === definition.label)
+            .some((row) => sameProperties(row.properties, definition.properties));
+          if (created) continue;
+          throw error;
+        }
+      }
+
+      // A pre-existing partial index cannot be combined with the composite
+      // index without dropping user data structures. Add only missing safe
+      // single-property indexes and keep the existing schema intact.
+      for (const property of definition.properties) {
+        indexes = await this.getIndexes();
+        const alreadyIndexed = indexes
+          .filter((row) => row.label === definition.label)
+          .some((row) => row.properties.includes(property));
+        if (alreadyIndexed) continue;
+        try {
+          await this.graph.query(`CREATE INDEX FOR (n:${definition.label}) ON (n.${property})`);
+        } catch (error) {
+          indexes = await this.getIndexes();
+          const created = indexes
+            .filter((row) => row.label === definition.label)
+            .some((row) => row.properties.includes(property));
+          if (!created) throw error;
+        }
+      }
+    }
+  }
+
+  private async getIndexes(): Promise<Array<{ label: string; properties: string[] }>> {
+    const result = await this.graph.roQuery<unknown[]>('CALL db.indexes()');
+    return this.toRows(result).flatMap((row) => {
+      const label = typeof row.label === 'string' ? row.label : undefined;
+      const properties = Array.isArray(row.properties)
+        ? row.properties.filter((property): property is string => typeof property === 'string')
+        : [];
+      return label && properties.length ? [{ label, properties }] : [];
+    });
+  }
+
   async checkHealth(): Promise<void> {
-    await this.graph.roQuery('RETURN 1 AS health');
+    try {
+      await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
+    } catch (error) {
+      // RO_QUERY returns "Invalid graph operation on empty key" for a brand-new
+      // selected graph. A harmless GRAPH.QUERY creates its key; then retry the
+      // read-only probe. Do not mask network, permission, or query errors.
+      if (!(error instanceof Error) || !error.message.toLowerCase().includes('empty key'))
+        throw error;
+      await this.graph.query('RETURN 1 AS health');
+      await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
+    }
   }
 
   async upsertService(input: {
@@ -66,14 +154,18 @@ export class FalkorDBStore {
     name: string;
     serviceType?: string;
     owner?: string;
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (s:Service {org_id: $orgId, id: $id})
        ON CREATE SET s.created_at = timestamp()
+       WITH s WHERE ($aggregateVersion IS NULL AND coalesce(s.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(s.catalog_version, 0) < $aggregateVersion)
        SET s.name = $name,
            s.type = $serviceType,
            s.owner = $owner,
-           s.updated_at = timestamp()`,
+           s.updated_at = timestamp(),
+           s.catalog_version = coalesce($aggregateVersion, coalesce(s.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
@@ -81,6 +173,7 @@ export class FalkorDBStore {
           name: input.name,
           serviceType: input.serviceType || 'service',
           owner: input.owner || '',
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );
@@ -91,6 +184,7 @@ export class FalkorDBStore {
     dependentId: string;
     dependencyId: string;
     criticality?: 'critical' | 'degraded' | 'optional';
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (dependent:Service {org_id: $orgId, id: $dependentId})
@@ -98,13 +192,17 @@ export class FalkorDBStore {
        MERGE (dependency:Service {org_id: $orgId, id: $dependencyId})
        ON CREATE SET dependency.name = $dependencyId, dependency.type = 'service'
        MERGE (dependent)-[r:DEPENDS_ON]->(dependency)
-       SET r.criticality = $criticality, r.updated_at = timestamp()`,
+       WITH r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       SET r.org_id = $orgId, r.criticality = $criticality, r.updated_at = timestamp(),
+           r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
           dependentId: input.dependentId,
           dependencyId: input.dependencyId,
           criticality: input.criticality || 'degraded',
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );
@@ -115,22 +213,91 @@ export class FalkorDBStore {
     incidentId: string;
     title: string;
     serviceId: string;
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (i:Incident {org_id: $orgId, id: $incidentId})
-       SET i.title = $title, i.updated_at = timestamp()
        MERGE (s:Service {org_id: $orgId, id: $serviceId})
        ON CREATE SET s.name = $serviceId, s.type = 'service'
-       MERGE (i)-[:AFFECTS]->(s)`,
+       MERGE (i)-[r:AFFECTS]->(s)
+       WITH i,r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       SET i.title = $title, i.updated_at = timestamp(), r.org_id = $orgId,
+           r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
           incidentId: input.incidentId,
           title: input.title,
           serviceId: input.serviceId,
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );
+  }
+
+  async unlinkDependency(input: {
+    orgId: string;
+    dependentId: string;
+    dependencyId: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (dependent:Service {org_id: $orgId, id: $dependentId})
+       -[r:DEPENDS_ON {org_id: $orgId}]->
+       (dependency:Service {org_id: $orgId, id: $dependencyId})
+       WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       DELETE r`,
+      { params: input }
+    );
+  }
+
+  async unlinkIncidentFromService(input: {
+    orgId: string;
+    incidentId: string;
+    serviceId: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (incident:Incident {org_id: $orgId, id: $incidentId})
+       -[r:AFFECTS {org_id: $orgId}]->
+       (service:Service {org_id: $orgId, id: $serviceId})
+       WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       DELETE r`,
+      { params: input }
+    );
+  }
+
+  async deleteService(input: {
+    orgId: string;
+    id: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (service:Service {org_id: $orgId, id: $id})
+       WHERE ($aggregateVersion IS NULL AND coalesce(service.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(service.catalog_version, 0) < $aggregateVersion)
+       DETACH DELETE service`,
+      { params: input }
+    );
+  }
+
+  /** Removes a tenant projection without touching nodes or edges from other organizations. */
+  async deleteOrganization(orgId: string): Promise<void> {
+    await this.graph.query(
+      `MATCH (a)-[r:DEPENDS_ON {org_id: $orgId}]->(b)
+       WHERE a.org_id = $orgId AND b.org_id = $orgId
+       DELETE r`,
+      { params: { orgId } }
+    );
+    await this.graph.query(`MATCH (i:Incident {org_id: $orgId}) DETACH DELETE i`, {
+      params: { orgId },
+    });
+    await this.graph.query(`MATCH (s:Service {org_id: $orgId}) DETACH DELETE s`, {
+      params: { orgId },
+    });
   }
 
   async getServiceNeighborhood(
@@ -165,7 +332,8 @@ export class FalkorDBStore {
     const result = await this.graph.roQuery<unknown[]>(
       `MATCH (current:Incident {org_id: $orgId, id: $incidentId})-[:AFFECTS]->(s:Service)
        MATCH (past:Incident {org_id: $orgId})-[:AFFECTS]->(s)
-       WHERE past.id <> current.id
+       WHERE s.org_id = $orgId AND past.id <> current.id
+         AND ALL(n IN [current, past, s] WHERE n.org_id = $orgId)
        WITH past, collect(DISTINCT s.name) AS sharedServices
        RETURN past.id AS id, past.title AS title, sharedServices
        ORDER BY size(sharedServices) DESC, id
@@ -265,6 +433,12 @@ function toObjectRows(value: unknown): GraphRow[] {
     : [];
 }
 
+function sameProperties(actual: string[], expected: readonly string[]): boolean {
+  return (
+    actual.length === expected.length && expected.every((property) => actual.includes(property))
+  );
+}
+
 export async function connectFalkorDB(
   url: string,
   graphName = 'runbook'
@@ -276,8 +450,15 @@ export async function connectFalkorDB(
   client.on('error', () => {
     console.error('FalkorDB client connection error');
   });
+  const store = new FalkorDBStore(client.selectGraph(graphName));
+  try {
+    await store.bootstrap();
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
   return {
-    store: new FalkorDBStore(client.selectGraph(graphName)),
+    store,
     close: () => client.close(),
   };
 }

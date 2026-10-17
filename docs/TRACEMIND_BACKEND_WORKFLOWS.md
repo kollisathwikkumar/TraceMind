@@ -27,6 +27,16 @@ The backend flow is: create incident and audit entry → traverse bounded depend
 
 `GET /api/v1/graph/incidents/:incidentId/evidence-paths?depth=3` returns up to 50 related incidents found over a bounded `DEPENDS_ON` path. `depth` is an integer in `[1,4]`. Each response includes service nodes, oriented relationship endpoints, relationship criticality, and a human-readable rationale. The query scopes every node on a path to the server organization. Responses are evidence paths, not root-cause confirmations.
 
+The registered `falkordb_incident_impact` agent tool exposes the same read-only, tenant-scoped graph as a bounded agent action. It accepts an incident ID and bounded depth/result count, never a graph name or organization supplied by the caller, and returns provenance with the result. Graph-derived impact is correlation evidence, not causal proof. The FalkorDB store also exposes bounded dependency traversal and graph algorithms to the application layer; callers must use the registered tool or scoped store API rather than arbitrary Cypher.
+
+## FalkorDB catalog and projection lifecycle
+
+`POST /api/v1/incidents` accepts optional `serviceIds` and records incident-to-service links as one PostgreSQL catalog/outbox batch after the incident write. The incident row and graph catalog batch are not one cross-store transaction. If graph-link enqueueing fails after incident creation, the response still identifies the created incident and includes `meta.graphProjection` so a client can retry linking without creating another incident. Malformed or oversized service lists are rejected before creation.
+
+Graph mutation endpoints use the authenticated request tenant. `DELETE /api/v1/graph/services/:id`, `DELETE /api/v1/graph/dependencies/:dependentId/:dependencyId`, and `DELETE /api/v1/graph/incidents/:incidentId/services/:serviceId` enqueue canonical catalog changes for projection. `POST /api/v1/graph/reconcile` rebuilds the selected tenant graph from the PostgreSQL catalog and requires `graph:admin`; other graph writes require `graph:write`. Reconciliation refuses oversized snapshots, holds the tenant advisory lock against concurrent writers/replay, and reprojects canonical state so stale outbox rows cannot restore removed edges. The catalog/outbox is authoritative; FalkorDB is its rebuildable query projection.
+
+The CI workflow runs the real FalkorDB integration suite against the pinned `falkordb/falkordb-server:v4.22.1` service image. Local execution uses `RUNBOOK_TEST_FALKORDB_URL=redis://127.0.0.1:6379 npm test -- src/knowledge/store/__tests__/falkordb-store.integration.test.ts` with a reachable disposable server.
+
 ## Controlled remediation
 
 1. `POST /api/v1/incidents/:incidentId/remediations` creates a pending plan with registered `actionId`, `postCheckId`, and `rollbackActionId` values. The request contains action identifiers, never shell text.

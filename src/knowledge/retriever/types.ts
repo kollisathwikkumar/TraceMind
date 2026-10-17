@@ -23,6 +23,9 @@ export interface IKnowledgeRetriever {
   getAllDocuments(): KnowledgeDocument[] | Promise<KnowledgeDocument[]>;
   close(): void;
 
+  /** Probe configured persistence backends without running a retrieval query. */
+  checkHealth?(): Promise<{ knowledgeStore: boolean; vectorStore?: boolean }>;
+
   // Optional CRUD methods (available on local retriever, not remote)
   getDocument?(id: string): KnowledgeDocument | null | Promise<KnowledgeDocument | null>;
   upsertDocument?(doc: KnowledgeDocument): void | Promise<void>;
