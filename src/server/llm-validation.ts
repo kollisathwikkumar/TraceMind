@@ -26,8 +26,13 @@ export async function validateLLMProvider(
     },
   };
 
+  // Runtime environment is the deployment source of truth. Prefer it over a
+  // possibly stale key persisted in config.yaml so key rotation takes effect
+  // without requiring a config-file edit or rebuild.
   const primaryKey =
-    config.llm.apiKey || environment.TRACEMIND_LLM_API_KEY || environment.NVIDIA_API_KEY;
+    environment.TRACEMIND_LLM_API_KEY?.trim() ||
+    environment.NVIDIA_API_KEY?.trim() ||
+    config.llm.apiKey;
   const fallbackKey = environment.TRACEMIND_LLM_FALLBACK_API_KEY?.trim();
 
   try {

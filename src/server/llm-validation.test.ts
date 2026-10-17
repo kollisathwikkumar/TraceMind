@@ -64,4 +64,42 @@ describe('LLM validation fallback', () => {
     });
     expect(createLLMClient).toHaveBeenCalledOnce();
   });
+
+  it('prefers the deployed environment primary key over a stale config-file key', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'rotated-primary-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient.mockReturnValue({
+      chat: vi.fn().mockResolvedValue({ content: 'primary response', toolCalls: [] }),
+    });
+
+    const configWithStaleKey = {
+      ...DEFAULT_CONFIG,
+      llm: { ...DEFAULT_CONFIG.llm, apiKey: 'stale-config-key' },
+    };
+    await expect(validateLLMProvider(configWithStaleKey)).resolves.toMatchObject({
+      content: 'primary response',
+      usedFallback: false,
+    });
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'rotated-primary-key' })
+    );
+  });
+
+  it('uses the fallback environment key when the primary key is absent', async () => {
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient
+      .mockReturnValueOnce({ chat: vi.fn().mockRejectedValue(new Error('primary unavailable')) })
+      .mockReturnValueOnce({
+        chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
+      });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toMatchObject({
+      content: 'fallback response',
+      usedFallback: true,
+    });
+    expect(createLLMClient).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ apiKey: 'fallback-test-key' })
+    );
+  });
 });

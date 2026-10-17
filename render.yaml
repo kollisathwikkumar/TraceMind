@@ -17,6 +17,18 @@ services:
         value: 'true'
       - key: TRACEMIND_SERVER_API_KEY
         sync: false
+      - key: TRACEMIND_LLM_API_KEY
+        sync: false
+      - key: TRACEMIND_LLM_FALLBACK_API_KEY
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: TRACEMIND_LLM_PROVIDER
+        value: openai-compatible
+      - key: TRACEMIND_LLM_MODEL
+        sync: false
+      - key: TRACEMIND_LLM_API_BASE_URL
+        sync: false
       - key: TRACEMIND_DATABASE_URL
         sync: false
       - key: TRACEMIND_DATABASE_MIGRATION_URL

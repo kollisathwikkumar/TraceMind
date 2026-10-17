@@ -116,7 +116,12 @@ Environment variables take precedence over file values:
 | `TRACEMIND_SERVER_API_KEY` | Required server key for CLI and remote API/MCP access. |
 | `TRACEMIND_DATABASE_URL` | PostgreSQL connection string for shared incident/workflow storage. |
 | `TRACEMIND_FALKORDB_URL` | **FalkorDB** connection string for graph-backed evidence. |
-| `TRACEMIND_LLM_API_KEY` | Model-provider credential; `NVIDIA_API_KEY` is also recognized for compatible NVIDIA endpoints. |
+| `TRACEMIND_LLM_PROVIDER` | Optional provider override (for example, `openai-compatible`). |
+| `TRACEMIND_LLM_MODEL` | Optional model ID override for the selected provider. |
+| `TRACEMIND_LLM_API_BASE_URL` | Optional OpenAI-compatible endpoint base URL. |
+| `TRACEMIND_LLM_API_KEY` | Primary model-provider credential; overrides an API key stored in `.runbook/config.yaml`. |
+| `TRACEMIND_LLM_FALLBACK_API_KEY` | Optional second credential used by the dashboard model-connection validation request if the primary call fails. Keep it separate from the primary key. |
+| `NVIDIA_API_KEY` | NVIDIA credential alias for OpenAI-compatible NVIDIA endpoints; used when `TRACEMIND_LLM_API_KEY` is unset. |
 | `AUTH0_DOMAIN` | Auth0 tenant for remote dashboard authentication. |
 | `AUTH0_CLIENT_ID` | Auth0 SPA client identifier. |
 | `AUTH0_AUDIENCE` | Identifier of the Auth0 API that issues dashboard access tokens. |
@@ -127,6 +132,8 @@ Environment variables take precedence over file values:
 For remote Auth0 login, configure at least one real Auth0 organization ID in `TRACEMIND_ORG_ID` or `TRACEMIND_ORG_IDS`; the dashboard cannot complete organization-scoped login when both are empty. Set the Auth0 SPA callback, logout URL, and allowed web origin to the dashboard origin. Configure Google and database/email-password login connections in Auth0. The browser uses Authorization Code with PKCE; the API validates JWT issuer, audience, expiry, and signature. Provider API keys are encrypted server-side and scoped to the authenticated subject when PostgreSQL and the encryption key are configured.
 
 Do not commit `.env` files, API keys, database credentials, or production data.
+
+For Render Blueprint deployments, the LLM key variables are declared with `sync: false` in `render.yaml`; provide their values in the Render dashboard rather than committing them. The validation endpoint tries the configured primary key first, retries once with `TRACEMIND_LLM_FALLBACK_API_KEY` on failure, and returns `usedFallback: true` when the fallback succeeds. A configured environment key takes precedence over a stale key saved in the config file.
 
 ### FalkorDB hackathon path
 
