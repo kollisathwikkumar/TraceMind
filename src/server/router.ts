@@ -761,6 +761,15 @@ const DASHBOARD_BOOTSTRAP_READS = new Set([
   'GET /api/v1/knowledge/services',
 ]);
 
+// Provider credentials are stored and retrieved only by the authenticated
+// subject. Every verified member of an enabled organization may manage their
+// own credential, without gaining access to organization-wide settings.
+const PERSONAL_CREDENTIAL_ENDPOINTS = new Set([
+  'GET /api/v1/settings/provider-key',
+  'PUT /api/v1/settings/provider-key',
+  'DELETE /api/v1/settings/provider-key',
+]);
+
 function hasRequiredScope(
   identity: Extract<RequestIdentity, { kind: 'auth0' }>,
   requiredScope: string,
@@ -770,7 +779,8 @@ function hasRequiredScope(
   return (
     identity.roles.includes('admin') ||
     identity.scopes.includes(requiredScope) ||
-    DASHBOARD_BOOTSTRAP_READS.has(`${method} ${path}`)
+    DASHBOARD_BOOTSTRAP_READS.has(`${method} ${path}`) ||
+    PERSONAL_CREDENTIAL_ENDPOINTS.has(`${method} ${path}`)
   );
 }
 
