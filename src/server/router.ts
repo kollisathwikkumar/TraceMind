@@ -10,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { IKnowledgeRetriever } from '../knowledge/retriever/types';
 import type { KnowledgeDocument, KnowledgeType } from '../knowledge/types';
 import type { Config } from '../utils/config';
-import { createLLMClient } from '../model/llm';
+import { validateLLMProvider } from './llm-validation';
 import type { MCPServer } from '../mcp/server';
 import type { FalkorDBStore } from '../knowledge/store/falkordb-store';
 import type { IncidentRepository, IncidentSeverity, IncidentStatus } from './incidents/store';
@@ -395,21 +395,10 @@ export function createRouter(routerConfig: RouterConfig) {
         return;
       }
       try {
-        const result = routerConfig.validateLLM
-          ? await routerConfig.validateLLM()
-          : await createLLMClient({
-              ...config.llm,
-              requestTimeoutMs: 45_000,
-              extraBody: {
-                chat_template_kwargs: {
-                  enable_thinking: false,
-                  force_nonempty_content: true,
-                },
-              },
-            }).chat(
-              'You are validating a model connection. Follow the user instruction exactly.',
-              'Reply with exactly: TraceMind model connection successful.'
-            );
+        const validation = routerConfig.validateLLM
+          ? { ...(await routerConfig.validateLLM()), usedFallback: false }
+          : await validateLLMProvider(config);
+        const result = validation;
         const response = result.content.trim();
         if (!response) throw new Error('Empty model response');
         sendJson(res, 200, {
@@ -418,6 +407,7 @@ export function createRouter(routerConfig: RouterConfig) {
             provider: config.llm.provider,
             model: config.llm.model,
             response: response.slice(0, 2000),
+            usedFallback: validation.usedFallback,
             checkedAt: new Date().toISOString(),
           },
         });
