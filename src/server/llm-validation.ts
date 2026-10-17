@@ -17,6 +17,7 @@ export type LLMProviderFailureCategory =
   | 'rate_limited'
   | 'timeout'
   | 'network'
+  | 'empty_response'
   | 'upstream_http'
   | 'unknown';
 
@@ -31,6 +32,13 @@ export class LLMValidationError extends Error {
   constructor(readonly attempts: LLMProviderAttemptFailure[]) {
     super(formatLLMValidationFailure(attempts));
     this.name = 'LLMValidationError';
+  }
+}
+
+class EmptyLLMResponseError extends Error {
+  constructor() {
+    super('Provider returned an empty response');
+    this.name = 'EmptyLLMResponseError';
   }
 }
 
@@ -66,6 +74,7 @@ export function classifyLLMProviderFailure(
   error: unknown,
   source: LLMProviderAttemptFailure['source']
 ): LLMProviderAttemptFailure {
+  if (error instanceof EmptyLLMResponseError) return { source, category: 'empty_response' };
   const status = statusFromError(error);
   const text = errorText(error);
   let category: LLMProviderFailureCategory;
@@ -126,7 +135,9 @@ export async function validateLLMProvider(
       VALIDATION_SYSTEM_PROMPT,
       VALIDATION_USER_PROMPT
     );
-    return { content: result.content, usedFallback: false };
+    const content = result.content.trim();
+    if (!content) throw new EmptyLLMResponseError();
+    return { content, usedFallback: false };
   } catch (primaryError) {
     const attempts = [classifyLLMProviderFailure(primaryError, 'primary')];
     if (!fallbackKey || fallbackKey === primaryKey) throw new LLMValidationError(attempts);
@@ -135,7 +146,9 @@ export async function validateLLMProvider(
         VALIDATION_SYSTEM_PROMPT,
         VALIDATION_USER_PROMPT
       );
-      return { content: result.content, usedFallback: true };
+      const content = result.content.trim();
+      if (!content) throw new EmptyLLMResponseError();
+      return { content, usedFallback: true };
     } catch (fallbackError) {
       attempts.push(classifyLLMProviderFailure(fallbackError, 'fallback'));
       throw new LLMValidationError(attempts);

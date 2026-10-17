@@ -44,6 +44,40 @@ describe('LLM validation fallback', () => {
     );
   });
 
+  it('retries with fallback when the primary responds with empty content', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient
+      .mockReturnValueOnce({ chat: vi.fn().mockResolvedValue({ content: '   ', toolCalls: [] }) })
+      .mockReturnValueOnce({
+        chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
+      });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
+      content: 'fallback response',
+      usedFallback: true,
+    });
+    expect(createLLMClient).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports empty responses from both keys as safe attempt diagnostics', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient.mockReturnValue({
+      chat: vi.fn().mockResolvedValue({ content: '', toolCalls: [] }),
+    });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
+      name: 'LLMValidationError',
+      attempts: [
+        { source: 'primary', category: 'empty_response' },
+        { source: 'fallback', category: 'empty_response' },
+      ],
+      message: 'Provider validation failed. Primary: empty response; Fallback: empty response.',
+    });
+    expect(createLLMClient).toHaveBeenCalledTimes(2);
+  });
+
   it('does not retry with a missing or duplicate fallback key', async () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'primary-test-key';

@@ -400,7 +400,9 @@ export function createRouter(routerConfig: RouterConfig) {
           : await validateLLMProvider(config);
         const result = validation;
         const response = result.content.trim();
-        if (!response) throw new Error('Empty model response');
+        if (!response) {
+          throw new LLMValidationError([{ source: 'primary', category: 'empty_response' }]);
+        }
         sendJson(res, 200, {
           data: {
             status: 'connected',
