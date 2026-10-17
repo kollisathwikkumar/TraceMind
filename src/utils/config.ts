@@ -269,7 +269,10 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     if (existsSync(location)) {
       try {
         const content = await readFile(location, 'utf-8');
-        const parsed = resolveEnvVars(parseYaml(content) as Record<string, unknown>);
+        const parsed = withLLMEnvironment(
+          resolveEnvVars(parseYaml(content) as Record<string, unknown>),
+          process.env
+        );
         return ConfigSchema.parse(parsed);
       } catch (error) {
         console.error(`Error loading config from ${location}:`, error);
@@ -277,7 +280,34 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     }
   }
 
-  return DEFAULT_CONFIG;
+  return ConfigSchema.parse(withLLMEnvironment({}, process.env));
+}
+
+/**
+ * Apply deployment-level LLM selection without requiring a writable config file.
+ * This is important for ephemeral hosts where only environment variables persist.
+ */
+function withLLMEnvironment(
+  config: Record<string, unknown>,
+  environment: NodeJS.ProcessEnv
+): Record<string, unknown> {
+  const llm = {
+    ...(config.llm && typeof config.llm === 'object' && !Array.isArray(config.llm)
+      ? (config.llm as Record<string, unknown>)
+      : {}),
+  };
+
+  if (environment.TRACEMIND_LLM_PROVIDER?.trim()) {
+    llm.provider = environment.TRACEMIND_LLM_PROVIDER.trim();
+  }
+  if (environment.TRACEMIND_LLM_MODEL?.trim()) {
+    llm.model = environment.TRACEMIND_LLM_MODEL.trim();
+  }
+  if (environment.TRACEMIND_LLM_API_BASE_URL?.trim()) {
+    llm.apiBaseUrl = environment.TRACEMIND_LLM_API_BASE_URL.trim();
+  }
+
+  return { ...config, llm };
 }
 
 /**
