@@ -9,6 +9,32 @@ import {
 
 const connectionString = process.env.RUNBOOK_TEST_DATABASE_URL;
 
+describe('graph catalog migration bootstrap', () => {
+  it('creates every catalog table before granting runtime access', async () => {
+    const statements: string[] = [];
+    const client = {
+      query: async (sql: string) => {
+        statements.push(sql);
+        if (sql.includes('current_schema()')) return { rows: [{ schema_name: 'public' }] };
+        return { rows: [] };
+      },
+      release: () => undefined,
+    };
+    const pool = { connect: async () => client } as unknown as Pool;
+
+    await migrateGraphCatalog(pool, 'tracemind_runtime');
+
+    const createTables = statements.findIndex((sql) =>
+      sql.includes('CREATE TABLE IF NOT EXISTS graph_catalog_services')
+    );
+    const grantTables = statements.findIndex((sql) =>
+      sql.startsWith('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE')
+    );
+    expect(createTables).toBeGreaterThan(-1);
+    expect(grantTables).toBeGreaterThan(createTables);
+  });
+});
+
 describe.skipIf(!connectionString)(
   'PostgreSQL graph catalog and transactional projection outbox',
   () => {
