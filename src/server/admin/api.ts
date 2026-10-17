@@ -141,6 +141,17 @@ export interface EvaluationAnalytics {
 export class AdminApi {
   constructor(private credential?: string | ((scope?: string) => Promise<string>)) {}
 
+  private unexpectedResponse(path: string, res: Response, contentType: string): Error {
+    const status = `HTTP ${res.status}`;
+    const type = contentType || 'unknown content type';
+    const redirectHint = res.redirected
+      ? ' The request was redirected, which can happen when the API route is unavailable or the session is no longer valid.'
+      : '';
+    return new Error(
+      `TraceMind API ${path} returned a non-JSON response (${status}, ${type}). Check that the deployed API route is available and sign in again if needed.${redirectHint}`
+    );
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token =
       typeof this.credential === 'string'
@@ -158,7 +169,21 @@ export class AdminApi {
       body: body ? JSON.stringify(body) : undefined,
     });
 
-    const json = await res.json();
+    const contentType =
+      res.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+    if (!contentType.includes('json')) {
+      // Render/static-host fallbacks and Auth0 redirects can return an HTML
+      // document for an API request. Calling res.json() here masks the useful
+      // HTTP status with an opaque "Unexpected token '<'" SyntaxError.
+      throw this.unexpectedResponse(path, res, contentType);
+    }
+
+    let json: { data?: T; error?: { message?: string } };
+    try {
+      json = (await res.json()) as { data?: T; error?: { message?: string } };
+    } catch {
+      throw this.unexpectedResponse(path, res, contentType);
+    }
     if (!res.ok) {
       throw new Error(json.error?.message || `Request failed: ${res.status}`);
     }
