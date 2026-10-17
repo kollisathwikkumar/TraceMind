@@ -228,9 +228,7 @@ function AuthenticatedApp({
       authorizationParams: {
         audience: config.audience,
         organization: organizationId,
-        scope: scope
-          ? `${DASHBOARD_AUTHORIZATION_SCOPE} ${scope}`
-          : DASHBOARD_AUTHORIZATION_SCOPE,
+        scope: scope ? scope : DASHBOARD_AUTHORIZATION_SCOPE,
       },
     });
     if (!token) throw new Error('No access token was returned for the TraceMind API');
