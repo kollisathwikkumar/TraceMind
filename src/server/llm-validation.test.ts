@@ -234,12 +234,9 @@ describe('LLM validation fallback', () => {
     });
     expect(createLLMClient).toHaveBeenCalledWith(
       expect.objectContaining({
-        maxTokens: 16_384,
+        maxTokens: 512,
         requestTimeoutMs: 90_000,
-        extraBody: {
-          chat_template_kwargs: { enable_thinking: true },
-          reasoning_budget: 8_192,
-        },
+        extraBody: { chat_template_kwargs: { enable_thinking: false } },
         apiKey: 'primary-test-key',
       })
     );

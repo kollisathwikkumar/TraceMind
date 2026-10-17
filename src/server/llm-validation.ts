@@ -117,22 +117,13 @@ export async function validateLLMProvider(
 ): Promise<LLMValidationResponse> {
   const base = {
     ...config.llm,
-    // Nemotron 3.5 Lightning may spend the early output budget on its
-    // reasoning trace; NVIDIA's hosted example allows 16k tokens so the
-    // user-visible answer can follow. Keep the deadline bounded but long
-    // enough for the hosted model's first-use warm-up.
-    maxTokens: config.llm.provider === 'openai-compatible' ? 16_384 : 256,
+    // Validation asks for a fixed, tiny answer, so disable long-form
+    // reasoning and reserve only a small visible-output budget. NVIDIA's
+    // hosted NIM guide uses this direct-answer mode for simple prompts.
+    maxTokens: config.llm.provider === 'openai-compatible' ? 512 : 256,
     requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
     ...(config.llm.provider === 'openai-compatible'
-      ? {
-          // Bound reasoning so the model has a reserved part of the output
-          // budget for its visible answer. NVIDIA's hosted Nemotron endpoint
-          // accepts this as a top-level chat-completions parameter.
-          extraBody: {
-            chat_template_kwargs: { enable_thinking: true },
-            reasoning_budget: 8_192,
-          },
-        }
+      ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } }
       : {}),
   };
 
