@@ -223,12 +223,12 @@ function AuthenticatedApp({
   if (isLoading) return <AuthInitializationScreen />;
   if (error) return <Auth0LoginScreen authError={error} organizationId={organizationId} />;
   if (!isAuthenticated) return <Auth0LoginScreen organizationId={organizationId} />;
-  const api = new AdminApi(async (scope) => {
+  const api = new AdminApi(async () => {
     const token = await getAccessTokenSilently({
       authorizationParams: {
         audience: config.audience,
         organization: organizationId,
-        scope: scope ? scope : DASHBOARD_AUTHORIZATION_SCOPE,
+        scope: DASHBOARD_AUTHORIZATION_SCOPE,
       },
     });
     if (!token) throw new Error('No access token was returned for the TraceMind API');

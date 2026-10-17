@@ -33,6 +33,7 @@ export const DASHBOARD_AUTHORIZATION_SCOPE = [
   'profile',
   'email',
   ...DASHBOARD_READ_SCOPES,
+  'llm:validate',
 ].join(' ');
 
 /**

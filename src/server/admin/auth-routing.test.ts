@@ -72,6 +72,7 @@ describe('organizationLoginAuthorizationParams', () => {
       'graph:read',
       'remediations:read',
       'evaluations:read',
+      'llm:validate',
     ]);
     expect(authorizationParams?.scope).not.toContain(':write');
   });
