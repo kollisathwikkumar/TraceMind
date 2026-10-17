@@ -153,6 +153,14 @@ describe('local Auth0 JWT → HTTP → tenant persistence integration', () => {
       'incidents:read',
       'incidents:write',
     ]);
+    const missingOrganization = await new SignJWT({ scope: 'incidents:read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'local-test-key' })
+      .setIssuer(auth0.issuer)
+      .setAudience(auth0.audience)
+      .setSubject('auth0|missing-organization')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(privateKey);
     const alphaReader = await mint('auth0|alpha-reader', 'org-alpha', ['incidents:read']);
     const betaUser = await mint('auth0|beta-user', 'org-beta', ['incidents:read']);
     const foreignTenant = await mint('auth0|foreign', 'org-not-enabled', ['incidents:read']);
@@ -185,6 +193,13 @@ describe('local Auth0 JWT → HTTP → tenant persistence integration', () => {
     expect(
       (await fetch(`${base}/api/v1/incidents`, { headers: headers(alphaReader) })).status
     ).toBe(200);
+    const missingOrganizationResponse = await fetch(`${base}/api/v1/incidents`, {
+      headers: headers(missingOrganization),
+    });
+    expect(missingOrganizationResponse.status).toBe(403);
+    expect(await missingOrganizationResponse.json()).toMatchObject({
+      error: { code: 'tenant_required' },
+    });
     const deniedWrite = await fetch(`${base}/api/v1/incidents`, {
       method: 'POST',
       headers: headers(alphaReader),

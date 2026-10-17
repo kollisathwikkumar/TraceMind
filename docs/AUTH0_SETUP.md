@@ -23,6 +23,15 @@ access tokens for the configured API audience. The API verifies issuer, audience
 expiry and RS256 signatures against the tenant JWKS. The Google and email/password
 credentials remain with Auth0; TraceMind never receives the user's password.
 
+For the remote dashboard, set `TRACEMIND_ORG_ID` to one Auth0 organization ID
+(`org_...`) or `TRACEMIND_ORG_IDS` to a comma-separated allowlist of those IDs.
+The dashboard requests an Auth0 token with the selected organization parameter;
+for multiple organizations it presents a picker. The Auth0 SPA application must
+be enabled for Organizations and the signed-in user must belong to the selected
+organization. The API independently checks the signed `org_id` claim against its
+allowlist before using it as a tenant, so the browser selection does not grant
+membership or access by itself.
+
 ## PostgreSQL and personal provider keys
 
 The backend uses PostgreSQL when `TRACEMIND_DATABASE_URL` (or the existing
