@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { safeAuthReturnTarget } from './auth-routing';
+import {
+  authReturnToWithoutInvitation,
+  organizationLoginAuthorizationParams,
+  safeAuthReturnTarget,
+} from './auth-routing';
 
 describe('safeAuthReturnTarget', () => {
   it('preserves an in-app dashboard route without a full-page redirect', () => {
@@ -14,5 +18,52 @@ describe('safeAuthReturnTarget', () => {
     ).toBeUndefined();
     expect(safeAuthReturnTarget('/admin-evil', 'https://tracemind.example')).toBeUndefined();
     expect(safeAuthReturnTarget('/settings', 'https://tracemind.example')).toBeUndefined();
+  });
+});
+
+describe('organizationLoginAuthorizationParams', () => {
+  it('extracts and forwards a valid organization invitation', () => {
+    const forwardedAuthorizationParams = organizationLoginAuthorizationParams(
+      'org_tracemind',
+      '?invitation=invite-token&organization=org_tracemind'
+    );
+
+    expect(forwardedAuthorizationParams).toEqual({
+      organization: 'org_tracemind',
+      invitation: 'invite-token',
+    });
+  });
+
+  it('rejects an invitation that names a different organization', () => {
+    expect(
+      organizationLoginAuthorizationParams(
+        'org_tracemind',
+        '?invitation=invite-token&organization=org_other'
+      )
+    ).toBeNull();
+  });
+
+  it('rejects incomplete invitation parameters and ignores unrelated query values', () => {
+    expect(
+      organizationLoginAuthorizationParams('org_tracemind', '?invitation=invite-token')
+    ).toBeNull();
+    expect(
+      organizationLoginAuthorizationParams('org_tracemind', '?organization=org_other')
+    ).toBeNull();
+    expect(organizationLoginAuthorizationParams('org_tracemind', '?campaign=invite-token')).toEqual(
+      { organization: 'org_tracemind' }
+    );
+  });
+});
+
+describe('authReturnToWithoutInvitation', () => {
+  it('removes invitation credentials and organization routing from the return URL', () => {
+    expect(
+      authReturnToWithoutInvitation({
+        pathname: '/admin',
+        search: '?invitation=invite-token&organization=org_tracemind&view=incidents',
+        hash: '#/incidents',
+      })
+    ).toBe('/admin?view=incidents#/incidents');
   });
 });
