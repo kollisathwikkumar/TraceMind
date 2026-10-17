@@ -10,11 +10,11 @@
 import { existsSync } from 'fs';
 import { mkdir, readdir, readFile, writeFile } from 'fs/promises';
 import { basename, join } from 'path';
-import matter from 'gray-matter';
 import { z } from 'zod';
 import { stringify as stringifyYaml } from 'yaml';
 import type { InvestigationResult } from '../agent/investigation-orchestrator';
 import { extractJSON } from '../agent/llm-parser';
+import { parseFrontMatter } from '../utils/frontmatter';
 
 export interface LearningEvent {
   timestamp: string;
@@ -164,8 +164,8 @@ async function loadLocalRunbooks(baseDir: string): Promise<LocalRunbook[]> {
 
   for (const path of files) {
     const raw = await readFile(path, 'utf-8');
-    const parsed = matter(raw);
-    const data = parsed.data as Record<string, unknown>;
+    const parsed = parseFrontMatter(raw);
+    const data = parsed.data;
 
     const services = Array.isArray(data.services)
       ? data.services.map((service) => String(service).trim()).filter(Boolean)

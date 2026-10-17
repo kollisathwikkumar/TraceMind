@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: tracemind
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node dist/cli.js server --host 0.0.0.0 --port $PORT --base-dir /tmp/tracemind
+    healthCheckPath: /readyz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.11.1
+      - key: NODE_ENV
+        value: production
+      - key: TRACEMIND_REQUIRE_POSTGRES
+        value: 'true'
+      - key: TRACEMIND_REQUIRE_FALKORDB
+        value: 'true'
+      - key: TRACEMIND_SERVER_API_KEY
+        sync: false
+      - key: TRACEMIND_DATABASE_URL
+        sync: false
+      - key: TRACEMIND_DATABASE_MIGRATION_URL
+        sync: false
+      - key: TRACEMIND_DATABASE_RUNTIME_ROLE
+        sync: false
+      - key: TRACEMIND_FALKORDB_URL
+        sync: false
+      - key: TRACEMIND_FALKORDB_GRAPH_NAME
+        sync: false
+      - key: TRACEMIND_ORG_ID
+        sync: false
+      - key: TRACEMIND_ORG_IDS
+        sync: false
+      - key: TRACEMIND_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_AUDIENCE
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_URL
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_TOKEN
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_ALLOWED_ORIGINS
+        sync: false
+      - key: TRACEMIND_REMEDIATION_ACTION_IDS
+        sync: false
+      - key: TRACEMIND_REMEDIATION_CHECK_IDS
+        sync: false
+      - key: TRACEMIND_REMEDIATION_ROLLBACK_IDS
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_REQUIRED
+        value: 'false'

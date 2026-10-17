@@ -57,7 +57,9 @@ export class FalkorDBStore {
   constructor(private readonly graph: FalkorGraphPort) {}
 
   async checkHealth(): Promise<void> {
-    await this.graph.roQuery('RETURN 1 AS health');
+    // FalkorDB RO_QUERY requires a graph operation; bare RETURN can be parsed as
+    // an operation against an empty graph key and fail even when the graph is healthy.
+    await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
   }
 
   async upsertService(input: {
@@ -66,14 +68,18 @@ export class FalkorDBStore {
     name: string;
     serviceType?: string;
     owner?: string;
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (s:Service {org_id: $orgId, id: $id})
        ON CREATE SET s.created_at = timestamp()
+       WITH s WHERE ($aggregateVersion IS NULL AND coalesce(s.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(s.catalog_version, 0) < $aggregateVersion)
        SET s.name = $name,
            s.type = $serviceType,
            s.owner = $owner,
-           s.updated_at = timestamp()`,
+           s.updated_at = timestamp(),
+           s.catalog_version = coalesce($aggregateVersion, coalesce(s.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
@@ -81,6 +87,7 @@ export class FalkorDBStore {
           name: input.name,
           serviceType: input.serviceType || 'service',
           owner: input.owner || '',
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );
@@ -91,6 +98,7 @@ export class FalkorDBStore {
     dependentId: string;
     dependencyId: string;
     criticality?: 'critical' | 'degraded' | 'optional';
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (dependent:Service {org_id: $orgId, id: $dependentId})
@@ -98,13 +106,17 @@ export class FalkorDBStore {
        MERGE (dependency:Service {org_id: $orgId, id: $dependencyId})
        ON CREATE SET dependency.name = $dependencyId, dependency.type = 'service'
        MERGE (dependent)-[r:DEPENDS_ON]->(dependency)
-       SET r.criticality = $criticality, r.updated_at = timestamp()`,
+       WITH r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       SET r.criticality = $criticality, r.updated_at = timestamp(),
+           r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
           dependentId: input.dependentId,
           dependencyId: input.dependencyId,
           criticality: input.criticality || 'degraded',
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );
@@ -115,19 +127,24 @@ export class FalkorDBStore {
     incidentId: string;
     title: string;
     serviceId: string;
+    aggregateVersion?: number;
   }): Promise<void> {
     await this.graph.query(
       `MERGE (i:Incident {org_id: $orgId, id: $incidentId})
-       SET i.title = $title, i.updated_at = timestamp()
        MERGE (s:Service {org_id: $orgId, id: $serviceId})
        ON CREATE SET s.name = $serviceId, s.type = 'service'
-       MERGE (i)-[:AFFECTS]->(s)`,
+       MERGE (i)-[r:AFFECTS]->(s)
+       WITH i,r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+         OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       SET i.title = $title, i.updated_at = timestamp(),
+           r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
           orgId: input.orgId,
           incidentId: input.incidentId,
           title: input.title,
           serviceId: input.serviceId,
+          aggregateVersion: input.aggregateVersion ?? null,
         },
       }
     );

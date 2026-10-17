@@ -34,4 +34,15 @@ describe('IncidentStore', () => {
     expect(() => store.update(incident.id, { severity: 'urgent' as never }, 'operator')).toThrow();
     store.close();
   });
+
+  it('isolates incident rows, updates, and events by tenant', () => {
+    const store = makeStore();
+    const incident = store.create({ title: 'Tenant A only', severity: 'SEV-2' }, 'operator-a', 'org-a');
+    expect(store.get(incident.id, 'org-b')).toBeUndefined();
+    expect(store.list('org-b')).toEqual([]);
+    expect(store.events(incident.id, 'org-b')).toEqual([]);
+    expect(store.update(incident.id, { title: 'overwritten' }, 'operator-b', 'org-b')).toBeUndefined();
+    expect(store.get(incident.id, 'org-a')?.title).toBe('Tenant A only');
+    expect(store.events(incident.id, 'org-a')).toHaveLength(1);
+  });
 });

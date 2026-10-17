@@ -99,13 +99,12 @@ describe('incident API', () => {
     expect(admin.headers.get('content-security-policy')).toContain(
       "connect-src 'self' https://tenant.example.auth0.com;"
     );
-    expect(admin.headers.get('content-security-policy')).toContain(
-      "frame-src 'self' https://tenant.example.auth0.com;"
-    );
+    expect(admin.headers.get('content-security-policy')).toContain("frame-ancestors 'none';");
+    expect(admin.headers.get('content-security-policy')).not.toContain('frame-src');
 
     const api = await fetch(`${base}/api/v1/auth/config`);
     expect(api.headers.get('content-security-policy')).toContain("connect-src 'self';");
-    expect(api.headers.get('content-security-policy')).toContain("frame-src 'self';");
+    expect(api.headers.get('content-security-policy')).not.toContain('frame-src');
     expect(api.headers.get('content-security-policy')).not.toContain('tenant.example.auth0.com');
   });
 
@@ -138,6 +137,142 @@ describe('incident API', () => {
     expect(await valid.json()).toMatchObject({ data: { authenticated: true } });
   });
 
+  it('serves dependency-independent liveness and dependency-aware readiness probes', async () => {
+    const verifyAuth0Token = vi.fn().mockRejectedValue(new Error('Auth0 unavailable'));
+    const base = await startApi(DEFAULT_CONFIG, undefined, { verifyAuth0Token });
+
+    const live = await fetch(`${base}/livez`, {
+      headers: { Authorization: 'Bearer probe-token' },
+    });
+    expect(live.status).toBe(200);
+    expect(await live.json()).toMatchObject({ data: { status: 'alive' } });
+    const headLive = await fetch(`${base}/livez`, { method: 'HEAD' });
+    expect(headLive.status).toBe(200);
+    expect(await headLive.text()).toBe('');
+
+    const ready = await fetch(`${base}/readyz`);
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toMatchObject({ data: { status: 'ready' } });
+    expect(verifyAuth0Token).not.toHaveBeenCalled();
+    const headReady = await fetch(`${base}/readyz`, { method: 'HEAD' });
+    expect(headReady.status).toBe(200);
+    expect(await headReady.text()).toBe('');
+  });
+
+  it('marks readiness unhealthy when a configured graph store is unavailable', async () => {
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      graphStore: {
+        checkHealth: vi.fn().mockRejectedValue(new Error('graph unavailable')),
+      } as never,
+    });
+
+    const ready = await fetch(`${base}/readyz`);
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({
+      data: {
+        status: 'not_ready',
+        components: { graphStore: 'unhealthy' },
+      },
+    });
+    const headReady = await fetch(`${base}/readyz`, { method: 'HEAD' });
+    expect(headReady.status).toBe(503);
+    expect(await headReady.text()).toBe('');
+  });
+
+  it('checks graph projection readiness for every configured tenant', async () => {
+    const checkHealth = vi.fn(async (orgId?: string) => (orgId === 'org-b' ? 2 : 1));
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      graphOrgId: 'org-a',
+      auth0OrgIds: ['org-a', 'org-b'],
+      graphCatalogStore: { checkHealth } as never,
+    });
+    const ready = await fetch(`${base}/readyz`);
+    expect(ready.status).toBe(200);
+    expect(checkHealth.mock.calls.map(([orgId]) => orgId).sort()).toEqual(['org-a', 'org-b']);
+    expect(await ready.json()).toMatchObject({ data: { graphProjectionPending: 3 } });
+  });
+
+  it('marks PostgreSQL-backed knowledge and vector stores unready when their probes fail', async () => {
+    const checkHealth = vi.fn().mockResolvedValue({
+      knowledgeStore: false,
+      vectorStore: false,
+    });
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      databaseDriver: 'postgres',
+      retriever: { checkHealth, close: vi.fn() } as unknown as IKnowledgeRetriever,
+    });
+
+    const ready = await fetch(`${base}/readyz`);
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({
+      data: {
+        status: 'not_ready',
+        components: {
+          knowledgeStore: 'unhealthy',
+          vectorStore: 'unhealthy',
+        },
+      },
+    });
+    expect(checkHealth).toHaveBeenCalledOnce();
+  });
+
+  it('blocks multi-organization Auth0 from shared retriever and MCP fallbacks', async () => {
+    const globalSearch = vi.fn().mockResolvedValue({
+      runbooks: [],
+      postmortems: [],
+      architecture: [],
+      knownIssues: [],
+    });
+    const mcpToolCall = vi.fn();
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      graphOrgId: 'org-a',
+      auth0OrgIds: ['org-a', 'org-b'],
+      retriever: { search: globalSearch, close: vi.fn() } as unknown as IKnowledgeRetriever,
+      mcpServer: {
+        close: vi.fn(),
+        handleToolCall: mcpToolCall,
+      } as never,
+      verifyAuth0Token: async (token: string) =>
+        token === 'tenant-b'
+          ? {
+              sub: 'auth0|tenant-b',
+              scopes: ['knowledge:write', 'mcp:access'],
+              roles: [],
+              organizationId: 'org-b',
+            }
+          : undefined,
+    });
+    const headers = {
+      Authorization: 'Bearer tenant-b',
+      'Content-Type': 'application/json',
+    };
+
+    const knowledge = await fetch(`${base}/api/v1/knowledge/search`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query: 'tenant private data' }),
+    });
+    expect(knowledge.status).toBe(503);
+    expect(await knowledge.json()).toMatchObject({
+      error: { code: 'tenant_retriever_unavailable' },
+    });
+
+    const mcp = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search_runbooks', arguments: { query: 'tenant private data' } },
+      }),
+    });
+    expect(mcp.status).toBe(503);
+    expect(await mcp.json()).toMatchObject({ error: { code: 'tenant_mcp_unavailable' } });
+    expect(globalSearch).not.toHaveBeenCalled();
+    expect(mcpToolCall).not.toHaveBeenCalled();
+  });
+
   it('publishes Auth0 browser settings and scopes provider-key operations to verified subjects', async () => {
     const saved = new Map<string, { provider: string; apiKey: string }>();
     const base = await startApi(DEFAULT_CONFIG, undefined, {
@@ -148,7 +283,14 @@ describe('incident API', () => {
         issuer: 'https://tenant.example.auth0.com/',
       },
       verifyAuth0Token: async (token: string) =>
-        token === 'alice-token' ? { sub: 'auth0|alice' } : undefined,
+        token === 'alice-token'
+          ? {
+              sub: 'auth0|alice',
+              scopes: ['settings:keys'],
+              roles: [],
+              organizationId: 'default',
+            }
+          : undefined,
       providerKeyStore: {
         getStatus: async (subject: string) =>
           saved.has(subject)
@@ -200,6 +342,147 @@ describe('incident API', () => {
         })
       ).status
     ).toBe(401);
+  });
+
+  it('enforces Auth0 scopes and rejects organizations outside the configured allowlist', async () => {
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      auth0OrgIds: ['default', 'org-b'],
+      verifyAuth0Token: async (token: string) => {
+        if (token === 'read-only') {
+          return {
+            sub: 'auth0|reader',
+            scopes: ['incidents:read'],
+            roles: [],
+            organizationId: 'default',
+          };
+        }
+        if (token === 'write-unlisted-org') {
+          return {
+            sub: 'auth0|foreign',
+            scopes: ['incidents:read', 'incidents:write'],
+            roles: [],
+            organizationId: 'not-allowed',
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const readOnly = { Authorization: 'Bearer read-only' };
+    expect((await fetch(`${base}/api/v1/incidents`, { headers: readOnly })).status).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/api/v1/incidents`, {
+          method: 'POST',
+          headers: { ...readOnly, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'Denied write', severity: 'SEV-3' }),
+        })
+      ).status
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${base}/api/v1/incidents`, {
+          headers: { Authorization: 'Bearer write-unlisted-org' },
+        })
+      ).status
+    ).toBe(403);
+  });
+
+  it('isolates incidents, remediation proposals, and evaluations by Auth0 organization', async () => {
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      auth0OrgIds: ['org-a', 'org-b'],
+      verifyAuth0Token: async (token: string) => {
+        const tenant = token.startsWith('tenant-a')
+          ? 'org-a'
+          : token.startsWith('tenant-b')
+            ? 'org-b'
+            : undefined;
+        if (!tenant) return undefined;
+        return {
+          sub: `auth0|${token}`,
+          scopes: [
+            'incidents:read',
+            'incidents:write',
+            'remediations:propose',
+            'remediations:read',
+            'evaluations:read',
+            'evaluations:write',
+          ],
+          roles: [],
+          organizationId: tenant,
+        };
+      },
+    });
+    const auth = (token: string) => ({
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    });
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers: auth('tenant-a-user'),
+      body: JSON.stringify({ title: 'Tenant A incident', severity: 'SEV-2' }),
+    });
+    expect(created.status).toBe(201);
+    const incidentId = ((await created.json()) as { data: { id: string } }).data.id;
+
+    expect(
+      await (await fetch(`${base}/api/v1/incidents`, { headers: auth('tenant-b-user') })).json()
+    ).toMatchObject({ data: [] });
+    expect(
+      (await fetch(`${base}/api/v1/incidents/${incidentId}`, { headers: auth('tenant-b-user') }))
+        .status
+    ).toBe(404);
+    expect(
+      (
+        await fetch(`${base}/api/v1/incidents/${incidentId}/events`, {
+          headers: auth('tenant-b-user'),
+        })
+      ).status
+    ).toBe(404);
+
+    const deniedProposal = await fetch(`${base}/api/v1/incidents/${incidentId}/remediations`, {
+      method: 'POST',
+      headers: auth('tenant-b-user'),
+      body: JSON.stringify({
+        title: 'Cross-tenant plan',
+        steps: [{ actionId: 'a', postCheckId: 'b', rollbackActionId: 'c', description: 'd' }],
+      }),
+    });
+    expect(deniedProposal.status).toBe(404);
+
+    const evaluation = {
+      dataset: 'shared-name',
+      caseId: 'same-case',
+      groundTruthRootCause: 'db',
+      relevantEvidenceIds: ['e'],
+      expectedFixOutcome: 'succeeded',
+      baseline: { rootCause: 'db', evidenceIds: ['e'], fixOutcome: 'succeeded' },
+      graph: { rootCause: 'db', evidenceIds: ['e'], fixOutcome: 'succeeded' },
+    };
+    expect(
+      (
+        await fetch(`${base}/api/v1/evaluations/cases`, {
+          method: 'POST',
+          headers: auth('tenant-a-user'),
+          body: JSON.stringify(evaluation),
+        })
+      ).status
+    ).toBe(201);
+    expect(
+      (
+        await fetch(`${base}/api/v1/evaluations/cases`, {
+          method: 'POST',
+          headers: auth('tenant-b-user'),
+          body: JSON.stringify(evaluation),
+        })
+      ).status
+    ).toBe(201);
+    for (const token of ['tenant-a-user', 'tenant-b-user']) {
+      const cases = await fetch(`${base}/api/v1/evaluations/cases?dataset=shared-name`, {
+        headers: auth(token),
+      });
+      expect(((await cases.json()) as { data: unknown[] }).data).toHaveLength(1);
+    }
   });
 
   it('requires admin authentication before testing the configured LLM', async () => {
@@ -320,17 +603,67 @@ describe('incident API', () => {
   });
 
   it('enforces approval and records real post-check results for remediation execution', async () => {
-    const base = await startApi();
-    const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const identities = {
+      proposer: {
+        sub: 'proposer',
+        scopes: ['incidents:write', 'remediations:propose'],
+        roles: [],
+        organizationId: 'default',
+      },
+      approver: {
+        sub: 'approver',
+        scopes: ['remediations:approve'],
+        roles: [],
+        organizationId: 'default',
+      },
+      executor: {
+        sub: 'executor',
+        scopes: ['remediations:execute'],
+        roles: [],
+        organizationId: 'default',
+      },
+      rollbackApprover: {
+        sub: 'rollback-approver',
+        scopes: ['remediations:approve'],
+        roles: [],
+        organizationId: 'default',
+      },
+      rollbackExecutor: {
+        sub: 'rollback-executor',
+        scopes: ['remediations:rollback'],
+        roles: [],
+        organizationId: 'default',
+      },
+      reconciler: {
+        sub: 'incident-responder',
+        scopes: ['remediations:reconcile'],
+        roles: [],
+        organizationId: 'default',
+      },
+      readOnlyReconciler: {
+        sub: 'reader',
+        scopes: ['remediations:read'],
+        roles: [],
+        organizationId: 'default',
+      },
+    };
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      auth0OrgIds: ['default'],
+      verifyAuth0Token: async (token) => identities[token as keyof typeof identities],
+    });
+    const auth0Headers = (token: keyof typeof identities) => ({
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    });
     const created = await fetch(`${base}/api/v1/incidents`, {
       method: 'POST',
-      headers,
+      headers: auth0Headers('proposer'),
       body: JSON.stringify({ title: 'Worker backlog', severity: 'SEV-2' }),
     });
     const incident = ((await created.json()) as { data: { id: string } }).data;
     const planResponse = await fetch(`${base}/api/v1/incidents/${incident.id}/remediations`, {
       method: 'POST',
-      headers,
+      headers: auth0Headers('proposer'),
       body: JSON.stringify({
         title: 'Recover worker',
         steps: [
@@ -349,21 +682,21 @@ describe('incident API', () => {
     const stepId = plan.steps[0].id;
     const blocked = await fetch(`${base}/api/v1/remediations/${plan.id}/steps/${stepId}/execute`, {
       method: 'POST',
-      headers,
+      headers: { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' },
     });
     expect(blocked.status).toBe(409);
     const approved = await fetch(
       `${base}/api/v1/remediations/${plan.id}/steps/${stepId}/approval`,
       {
         method: 'POST',
-        headers,
+        headers: auth0Headers('approver'),
         body: JSON.stringify({ decision: 'approve', reason: 'Reviewed impact and rollback' }),
       }
     );
     expect(approved.status).toBe(200);
     const executed = await fetch(`${base}/api/v1/remediations/${plan.id}/steps/${stepId}/execute`, {
       method: 'POST',
-      headers,
+      headers: auth0Headers('executor'),
     });
     expect(executed.status).toBe(200);
     expect(((await executed.json()) as { data: unknown }).data).toMatchObject({
@@ -373,26 +706,82 @@ describe('incident API', () => {
     });
     const rollbackBlocked = await fetch(
       `${base}/api/v1/remediations/${plan.id}/steps/${stepId}/rollback`,
-      { method: 'POST', headers }
+      {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' },
+      }
     );
     expect(rollbackBlocked.status).toBe(409);
     const rollbackApproval = await fetch(
       `${base}/api/v1/remediations/${plan.id}/steps/${stepId}/rollback-approval`,
       {
         method: 'POST',
-        headers,
+        headers: auth0Headers('rollbackApprover'),
         body: JSON.stringify({ decision: 'approve', reason: 'Restore if monitoring regresses' }),
       }
     );
     expect(rollbackApproval.status).toBe(200);
     const rollback = await fetch(
       `${base}/api/v1/remediations/${plan.id}/steps/${stepId}/rollback`,
-      { method: 'POST', headers }
+      { method: 'POST', headers: auth0Headers('rollbackExecutor') }
     );
     expect(rollback.status).toBe(200);
     expect(((await rollback.json()) as { data: unknown }).data).toMatchObject({
       status: 'rolled_back',
     });
+
+    const ambiguous = workflowStore!.createPlan(
+      incident.id,
+      'Reconcile uncertain broker outcome',
+      [{ actionId: 'worker.restart', postCheckId: 'worker.health', rollbackActionId: 'worker.restore', description: 'Ambiguous action' }],
+      'proposer'
+    );
+    const ambiguousStep = ambiguous.steps[0];
+    workflowStore!.decide(ambiguous.id, ambiguousStep.id, 'approve', 'approver', 'Approved for test');
+    workflowStore!.beginExecution(ambiguous.id, ambiguousStep.id, 'executor', 'ambiguous-lease');
+    workflowStore!.reconcileExpiredLeases('system', new Date(Date.now() + 120_000), 'default');
+    const reconcileUrl = `${base}/api/v1/remediations/${ambiguous.id}/steps/${ambiguousStep.id}/reconcile`;
+    expect((await fetch(reconcileUrl, {
+      method: 'POST',
+      headers: auth0Headers('readOnlyReconciler'),
+      body: JSON.stringify({ operation: 'execute', succeeded: true, evidence: 'broker key checked' }),
+    })).status).toBe(403);
+    const reconciled = await fetch(reconcileUrl, {
+      method: 'POST',
+      headers: auth0Headers('reconciler'),
+      body: JSON.stringify({ operation: 'execute', succeeded: true, evidence: 'Broker idempotency key and independent post-check confirmed action' }),
+    });
+    expect(reconciled.status).toBe(200);
+    expect(((await reconciled.json()) as { data: { steps: { status: string }[]; events: { action: string; actor: string }[] } }).data).toMatchObject({
+      steps: [{ status: 'execution_succeeded' }],
+      events: expect.arrayContaining([expect.objectContaining({ action: 'execute_reconciled', actor: 'auth0:incident-responder' })]),
+    });
+
+    const uncertainCheck = workflowStore!.createPlan(incident.id, 'Unknown post-check', [
+      { actionId: 'worker.restart', postCheckId: 'worker.health', rollbackActionId: 'worker.restore', description: 'Check outcome lost' },
+    ], 'proposer');
+    const checkStep = uncertainCheck.steps[0];
+    workflowStore!.decide(uncertainCheck.id, checkStep.id, 'approve', 'approver', 'Approved');
+    workflowStore!.beginExecution(uncertainCheck.id, checkStep.id, 'executor', 'verify-route-lease');
+    workflowStore!.setExecution(
+      uncertainCheck.id,
+      checkStep.id,
+      'verification_unknown',
+      { succeeded: true, output: 'action applied' },
+      { succeeded: false, error: 'Verification outcome unknown: timeout' },
+      'executor',
+      'verify-route-lease'
+    );
+    const verifyReconciled = await fetch(
+      `${base}/api/v1/remediations/${uncertainCheck.id}/steps/${checkStep.id}/reconcile`,
+      {
+        method: 'POST',
+        headers: auth0Headers('reconciler'),
+        body: JSON.stringify({ operation: 'verify', succeeded: true, evidence: 'Independent health check succeeded' }),
+      }
+    );
+    expect(verifyReconciled.status).toBe(200);
+    expect(((await verifyReconciled.json()) as { data: { steps: { status: string }[] } }).data.steps[0].status).toBe('verified');
   });
 
   it('stores paired known-case evaluation results and serves aggregate analytics', async () => {

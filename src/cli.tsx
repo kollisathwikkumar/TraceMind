@@ -14,6 +14,7 @@ import { Agent } from './agent/agent';
 import { createLLMClient } from './model/llm';
 import { toolRegistry } from './tools/registry';
 import { loadConfig, validateConfig } from './utils/config';
+import { parseFrontMatter } from './utils/frontmatter';
 import { quickSetup, loadServiceConfig, ONBOARDING_PROMPTS } from './config/onboarding';
 import { SetupWizard } from './cli/setup-wizard';
 import { ChatInterface } from './cli/chat';
@@ -1613,7 +1614,6 @@ knowledge
     const { readFile } = await import('fs/promises');
     const { join, resolve, basename, extname } = await import('path');
     const { parse: parseYaml } = await import('yaml');
-    const matter = (await import('gray-matter')).default;
 
     const filePath = resolve(file);
 
@@ -1634,10 +1634,15 @@ knowledge
       let services: string[] = [];
 
       if (ext === '.md' || ext === '.markdown') {
-        const { data: frontmatter } = matter(content);
-        title = frontmatter.title || basename(filePath, ext);
-        docType = frontmatter.type || options.type || 'runbook';
-        services = frontmatter.services || [];
+        const { data: frontmatter } = parseFrontMatter(content);
+        title =
+          (typeof frontmatter.title === 'string' ? frontmatter.title : undefined) ||
+          basename(filePath, ext);
+        docType =
+          (typeof frontmatter.type === 'string' ? frontmatter.type : undefined) ||
+          options.type ||
+          'runbook';
+        services = Array.isArray(frontmatter.services) ? frontmatter.services.map(String) : [];
       } else if (ext === '.yaml' || ext === '.yml') {
         const data = parseYaml(content);
         title = data.title || basename(filePath, ext);

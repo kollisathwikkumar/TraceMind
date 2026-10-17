@@ -12,6 +12,13 @@ function createGraph(): FalkorGraphPort & {
 }
 
 describe('FalkorDBStore', () => {
+  it('probes readiness with a graph operation supported by FalkorDB RO_QUERY', async () => {
+    const graph = createGraph();
+    const store = new FalkorDBStore(graph);
+    await expect(store.checkHealth()).resolves.toBeUndefined();
+    expect(graph.roQuery).toHaveBeenCalledWith('MATCH (n) RETURN count(n) AS health');
+  });
+
   it('upserts organization-scoped service nodes with bound parameters', async () => {
     const graph = createGraph();
     const store = new FalkorDBStore(graph);
@@ -34,6 +41,7 @@ describe('FalkorDBStore', () => {
       name: 'Payments',
       serviceType: 'service',
       owner: 'payments-team',
+      aggregateVersion: null,
     });
     expect(query).not.toContain('payments-team');
   });
@@ -59,12 +67,13 @@ describe('FalkorDBStore', () => {
     expect(graph.query.mock.calls[0][0]).toContain(
       'MERGE (dependent)-[r:DEPENDS_ON]->(dependency)'
     );
-    expect(graph.query.mock.calls[1][0]).toContain('MERGE (i)-[:AFFECTS]->(s)');
+    expect(graph.query.mock.calls[1][0]).toContain('MERGE (i)-[r:AFFECTS]->(s)');
     expect(graph.query.mock.calls[1][1].params).toEqual({
       orgId: 'org-a',
       incidentId: 'inc-1',
       title: 'Latency spike',
       serviceId: 'payments',
+      aggregateVersion: null,
     });
   });
 

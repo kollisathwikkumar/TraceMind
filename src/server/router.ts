@@ -23,6 +23,8 @@ import { RemediationWorkflow, type RemediationExecutor } from './workflows/remed
 import { handleMcpRequest } from './mcp-transport';
 import type { Auth0Config, Auth0Identity } from './auth0';
 import type { ProviderKeyStorePort } from './provider-keys';
+import type { GraphProjectionEvent } from './postgres-stores';
+import type { PostgresGraphCatalogStore } from './graph-catalog';
 import {
   authenticateRequest,
   readBody,
@@ -35,11 +37,22 @@ import {
 export interface RouterConfig {
   apiKey: string;
   retriever: IKnowledgeRetriever;
+  retrieverForTenant?: (tenantId: string) => Promise<IKnowledgeRetriever>;
   mcpServer: MCPServer;
   version: string;
   config: Config;
   graphStore?: FalkorDBStore;
   graphOrgId?: string;
+  /** Auth0 organization allowlist; when omitted, the configured legacy org is the only tenant. */
+  auth0OrgIds?: string[];
+  graphOutbox?: {
+    enqueue(event: GraphProjectionEvent): Promise<string>;
+    checkHealth?(orgId: string): Promise<number>;
+  };
+  graphCatalogStore?: Pick<
+    PostgresGraphCatalogStore,
+    'upsertService' | 'linkDependency' | 'linkIncidentToService' | 'checkHealth'
+  >;
   incidentStore?: IncidentRepository;
   workflowStore?: WorkflowRepository;
   auth0Config?: Auth0Config;
@@ -47,6 +60,12 @@ export interface RouterConfig {
   providerKeyStore?: ProviderKeyStorePort;
   databaseDriver?: 'postgres' | 'sqlite';
   remediationExecutor?: RemediationExecutor;
+  /** Fail readiness when remediation is required but no executor is configured. */
+  remediationExecutorRequired?: boolean;
+  /** Immutable source revision supplied by the deployment platform. */
+  buildSha?: string;
+  /** Maximum time a readiness dependency may take before it is unhealthy. */
+  healthCheckTimeoutMs?: number;
   /** Override the provider request in route-level tests. */
   validateLLM?: () => Promise<{ content: string }>;
 }
@@ -67,13 +86,15 @@ export function createRouter(routerConfig: RouterConfig) {
     routerConfig.remediationExecutor
   );
   const graphOrgId = routerConfig.graphOrgId || 'default';
+  const auth0OrgIds = new Set(
+    routerConfig.auth0OrgIds?.length ? routerConfig.auth0OrgIds : [graphOrgId]
+  );
   const startTime = Date.now();
 
   return async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const path = url.pathname;
     const method = req.method || 'GET';
-    const identity = await resolveRequestIdentity(req, apiKey, routerConfig.verifyAuth0Token);
 
     // Apply the configured browser policy consistently before any route writes headers.
     const cors = config.server.cors;
@@ -93,13 +114,16 @@ export function createRouter(routerConfig: RouterConfig) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     const adminAuth0Origin =
       /^\/admin(?:\/|$)/.test(path) && routerConfig.auth0Config
         ? new URL(routerConfig.auth0Config.issuer).origin
         : undefined;
     res.setHeader(
       'Content-Security-Policy',
-      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'${adminAuth0Origin ? ` ${adminAuth0Origin}` : ''}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
     );
     if (method === 'OPTIONS' && cors.enabled) {
       res.writeHead(204);
@@ -107,25 +131,56 @@ export function createRouter(routerConfig: RouterConfig) {
       return;
     }
 
-    // Health check — no auth required
-    if (path === '/api/v1/health' && method === 'GET') {
-      const [incidentResult, workflowResult, graphResult] = await Promise.all([
-        incidentStore
-          ? Promise.resolve(incidentStore.checkHealth())
-              .then(() => true)
-              .catch(() => false)
-          : Promise.resolve(false),
-        workflowStore
-          ? Promise.resolve(workflowStore.checkHealth())
-              .then(() => true)
-              .catch(() => false)
-          : Promise.resolve(false),
-        graphStore
-          ? Promise.resolve(graphStore.checkHealth())
-              .then(() => true)
-              .catch(() => false)
-          : Promise.resolve(true),
-      ]);
+    // Liveness is process-only. Readiness is bounded and verifies dependencies.
+    if (path === '/livez' && (method === 'GET' || method === 'HEAD')) {
+      sendProbe(res, 200, { status: 'alive' }, method);
+      return;
+    }
+    if (
+      (path === '/readyz' || path === '/api/v1/health') &&
+      (method === 'GET' || method === 'HEAD')
+    ) {
+      const timeoutMs = routerConfig.healthCheckTimeoutMs ?? 2_000;
+      const [incidentResult, workflowResult, graphResult, graphProjectionPending, knowledgeHealth] =
+        await Promise.all([
+          incidentStore
+            ? withTimeout(Promise.resolve(incidentStore.checkHealth()), timeoutMs)
+                .then(() => true)
+                .catch(() => false)
+            : Promise.resolve(false),
+          workflowStore
+            ? withTimeout(Promise.resolve(workflowStore.checkHealth()), timeoutMs)
+                .then(() => true)
+                .catch(() => false)
+            : Promise.resolve(false),
+          graphStore
+            ? withTimeout(Promise.resolve(graphStore.checkHealth()), timeoutMs)
+                .then(() => true)
+                .catch(() => false)
+            : Promise.resolve(true),
+          routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth
+            ? withTimeout(
+                Promise.all(
+                  [...new Set([graphOrgId, ...(routerConfig.auth0OrgIds ?? [])])].map(async (orgId) => {
+                    const [catalogPending, legacyPending] = await Promise.all([
+                      routerConfig.graphCatalogStore?.checkHealth(orgId) ?? 0,
+                      routerConfig.graphOutbox?.checkHealth?.(orgId) ?? 0,
+                    ]);
+                    return catalogPending + legacyPending;
+                  })
+                ),
+                timeoutMs
+              )
+                .then((pendingByTenant) => pendingByTenant.reduce((sum, count) => sum + count, 0))
+                .catch(() => undefined)
+            : Promise.resolve(undefined),
+          retriever.checkHealth
+            ? withTimeout(retriever.checkHealth(), timeoutMs).catch(() => null)
+            : Promise.resolve(undefined),
+        ]);
+      const postgresKnowledgeRequired = routerConfig.databaseDriver === 'postgres';
+      const knowledgeStoreHealthy = knowledgeHealth?.knowledgeStore === true;
+      const vectorStoreHealthy = knowledgeHealth?.vectorStore === true;
       const components = {
         incidentStore: incidentResult ? 'healthy' : incidentStore ? 'unhealthy' : 'missing',
         workflowStore: workflowResult ? 'healthy' : workflowStore ? 'unhealthy' : 'missing',
@@ -134,22 +189,68 @@ export function createRouter(routerConfig: RouterConfig) {
             ? 'healthy'
             : 'unhealthy'
           : 'optional_not_configured',
+        graphProjection: routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth
+          ? graphProjectionPending === undefined
+            ? 'unhealthy'
+            : 'healthy'
+          : 'optional_not_configured',
+        knowledgeStore: knowledgeHealth
+          ? knowledgeStoreHealthy
+            ? 'healthy'
+            : 'unhealthy'
+          : knowledgeHealth === null
+            ? 'unhealthy'
+            : postgresKnowledgeRequired
+              ? 'missing'
+              : 'optional_not_configured',
+        vectorStore:
+          knowledgeHealth === null
+            ? 'unhealthy'
+            : knowledgeHealth?.vectorStore !== undefined
+              ? vectorStoreHealthy
+                ? 'healthy'
+                : 'unhealthy'
+              : postgresKnowledgeRequired
+                ? 'missing'
+                : 'optional_not_configured',
         remediationExecutor: routerConfig.remediationExecutor
           ? 'configured'
-          : 'optional_not_configured',
+          : routerConfig.remediationExecutorRequired
+            ? 'required_not_configured'
+            : 'optional_not_configured',
       };
-      const ready = incidentResult && workflowResult && graphResult;
-      sendJson(res, ready ? 200 : 503, {
+      const ready =
+        incidentResult &&
+        workflowResult &&
+        graphResult &&
+        ((knowledgeHealth === undefined && !postgresKnowledgeRequired) || knowledgeStoreHealthy) &&
+        ((knowledgeHealth?.vectorStore === undefined && !postgresKnowledgeRequired) ||
+          vectorStoreHealthy) &&
+        (!(routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth) || graphProjectionPending !== undefined) &&
+        (!routerConfig.remediationExecutorRequired || Boolean(routerConfig.remediationExecutor));
+      const payload = {
         data: {
           status: ready ? 'ready' : 'not_ready',
           components,
+          ...(graphProjectionPending === undefined ? {} : { graphProjectionPending }),
           database: routerConfig.databaseDriver || 'unknown',
           version,
+          ...(routerConfig.buildSha ? { buildSha: routerConfig.buildSha } : {}),
           uptime: Math.floor((Date.now() - startTime) / 1000),
         },
-      });
+      };
+      if (method === 'HEAD') sendProbe(res, ready ? 200 : 503, payload.data, method);
+      else sendJson(res, ready ? 200 : 503, payload);
       return;
     }
+
+    // Public probes must not depend on Auth0/JWKS availability. Resolve the
+    // tenant only after liveness/readiness have returned.
+    const identity = await resolveRequestIdentity(req, apiKey, routerConfig.verifyAuth0Token);
+    const actor = requestActor(identity);
+    // Auth0 Organizations provide the authenticated tenant. Shared/local API keys
+    // remain intentionally single-tenant and use the configured server tenant.
+    const tenantId = identity?.kind === 'auth0' ? identity.organizationId || '' : graphOrgId;
 
     // Public Auth0 settings contain only values intended for the browser.
     if (path === '/api/v1/auth/config' && method === 'GET') {
@@ -178,6 +279,34 @@ export function createRouter(routerConfig: RouterConfig) {
       }
       sendJson(res, 200, { data: { authenticated: true } });
       return;
+    }
+
+    const requiredScope = requiredScopeFor(path, method);
+    if (requiredScope && identity?.kind === 'auth0') {
+      if (!identity.organizationId) {
+        sendJson(res, 403, {
+          error: {
+            code: 'tenant_required',
+            message: 'Auth0 token must include an organization claim',
+          },
+        });
+        return;
+      }
+      if (!auth0OrgIds.has(identity.organizationId)) {
+        sendJson(res, 403, {
+          error: {
+            code: 'tenant_forbidden',
+            message: 'Token organization is not enabled for this service',
+          },
+        });
+        return;
+      }
+      if (!identity.roles.includes('admin') && !identity.scopes.includes(requiredScope)) {
+        sendJson(res, 403, {
+          error: { code: 'insufficient_scope', message: `Required permission: ${requiredScope}` },
+        });
+        return;
+      }
     }
 
     if (path === '/api/v1/settings/provider-key' && ['GET', 'PUT', 'DELETE'].includes(method)) {
@@ -297,6 +426,15 @@ export function createRouter(routerConfig: RouterConfig) {
         });
         return;
       }
+      if (identity.kind === 'auth0') {
+        sendJson(res, 503, {
+          error: {
+            code: 'tenant_mcp_unavailable',
+            message: 'MCP does not yet support tenant-specific knowledge retrievers',
+          },
+        });
+        return;
+      }
       await handleMcpRequest(req, res, mcpServer);
       return;
     }
@@ -325,7 +463,10 @@ export function createRouter(routerConfig: RouterConfig) {
           path,
           method,
           graphStore,
-          graphOrgId
+          tenantId,
+          routerConfig.graphOutbox,
+          routerConfig.graphCatalogStore,
+          incidentStore
         );
         if (handled) return;
       } catch (error) {
@@ -356,7 +497,7 @@ export function createRouter(routerConfig: RouterConfig) {
         return;
       }
       try {
-        await handleIncidentRequest(req, res, path, method, incidentStore);
+        await handleIncidentRequest(req, res, path, method, incidentStore, actor, tenantId);
       } catch (error) {
         const invalidTransition =
           error instanceof Error && error.message.startsWith('Invalid incident status transition:');
@@ -402,7 +543,9 @@ export function createRouter(routerConfig: RouterConfig) {
           method,
           incidentStore,
           workflowStore,
-          remediation
+          remediation,
+          actor,
+          tenantId
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : '';
@@ -444,31 +587,44 @@ export function createRouter(routerConfig: RouterConfig) {
         return;
       }
 
+      if (identity.kind === 'auth0' && !routerConfig.retrieverForTenant) {
+        sendJson(res, 503, {
+          error: {
+            code: 'tenant_retriever_unavailable',
+            message: 'Knowledge retrieval is not configured for this Auth0 organization',
+          },
+        });
+        return;
+      }
+
       const start = Date.now();
 
       try {
+        const requestRetriever = routerConfig.retrieverForTenant
+          ? await routerConfig.retrieverForTenant(tenantId)
+          : retriever;
         if (path === '/api/v1/knowledge/search' && method === 'POST') {
-          await handleSearch(req, res, retriever, start);
+          await handleSearch(req, res, requestRetriever, start);
           return;
         }
 
         if (path === '/api/v1/knowledge/stats' && method === 'GET') {
-          await handleStats(res, retriever, start);
+          await handleStats(res, requestRetriever, start);
           return;
         }
 
         if (path === '/api/v1/knowledge/documents' && method === 'GET') {
-          await handleDocuments(url, res, retriever, start);
+          await handleDocuments(url, res, requestRetriever, start);
           return;
         }
 
         if (path === '/api/v1/knowledge/services' && method === 'GET') {
-          await handleServices(url, res, retriever, start);
+          await handleServices(url, res, requestRetriever, start);
           return;
         }
 
         if (path === '/api/v1/knowledge/sync' && method === 'POST') {
-          await handleSync(res, retriever, start);
+          await handleSync(res, requestRetriever, start);
           return;
         }
 
@@ -480,7 +636,7 @@ export function createRouter(routerConfig: RouterConfig) {
         // Document CRUD by ID: /api/v1/knowledge/documents/:id
         if (path.startsWith('/api/v1/knowledge/documents/') && path.split('/').length === 6) {
           const id = decodeURIComponent(path.split('/')[5]);
-          await handleDocumentById(req, res, retriever, id, method, start);
+          await handleDocumentById(req, res, requestRetriever, id, method, start);
           return;
         }
       } catch (error) {
@@ -499,20 +655,25 @@ export function createRouter(routerConfig: RouterConfig) {
       }
     }
 
-    // Public product launch page and assets.
-    if (
-      path === '/' ||
-      path === '/launch.html' ||
-      path === '/launch.css' ||
-      path === '/launch.js'
-    ) {
-      await serveLaunchFile(path, res);
-      return;
-    }
-
     // Admin UI — serve static files from admin-dist
     if (path === '/admin' || path.startsWith('/admin/')) {
       await serveAdminFile(path, res);
+      return;
+    }
+
+    if (
+      method === 'GET' &&
+      [
+        '/',
+        '/docs.html',
+        '/security.html',
+        '/launch.css',
+        '/launch.js',
+        '/styles.css',
+        '/script.js',
+      ].includes(path)
+    ) {
+      await serveLaunchFile(path, res);
       return;
     }
 
@@ -525,6 +686,55 @@ type RequestIdentity =
   | { kind: 'api-key' }
   | { kind: 'local-browser' }
   | ({ kind: 'auth0' } & Auth0Identity);
+
+function requestActor(identity: RequestIdentity | undefined): string {
+  if (identity?.kind === 'auth0') return `auth0:${identity.sub}`;
+  if (identity?.kind === 'local-browser') return 'local-browser';
+  return 'api-key';
+}
+
+function requiredScopeFor(path: string, method: string): string | undefined {
+  if (path === '/mcp') return 'mcp:access';
+  if (path === '/api/v1/llm/validate') return 'llm:validate';
+  if (path === '/api/v1/settings/provider-key') return 'settings:keys';
+  if (path.startsWith('/api/v1/graph/')) return method === 'GET' ? 'graph:read' : 'graph:write';
+  if (path === '/api/v1/incidents' || path.startsWith('/api/v1/incidents/')) {
+    if (path.includes('/remediations')) return 'remediations:propose';
+    return method === 'GET' ? 'incidents:read' : 'incidents:write';
+  }
+  if (path.startsWith('/api/v1/remediations/')) {
+    const action = path.split('/').at(-1);
+    if (method === 'GET') return 'remediations:read';
+    if (action === 'approval' || action === 'rollback-approval') return 'remediations:approve';
+    if (action === 'execute') return 'remediations:execute';
+    if (action === 'rollback') return 'remediations:rollback';
+    if (action === 'reconcile') return 'remediations:reconcile';
+  }
+  if (path.startsWith('/api/v1/evaluations/')) {
+    return method === 'GET' ? 'evaluations:read' : 'evaluations:write';
+  }
+  if (path.startsWith('/api/v1/knowledge/')) {
+    return method === 'GET' ? 'knowledge:read' : 'knowledge:write';
+  }
+  return undefined;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Health check timed out')), timeoutMs);
+    timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: Error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 async function resolveRequestIdentity(
   req: IncomingMessage,
@@ -576,15 +786,26 @@ export function isLocalBrowserRequest(req: IncomingMessage): boolean {
   return true;
 }
 
+function sendProbe(res: ServerResponse, status: number, data: unknown, method: string): void {
+  const body = JSON.stringify({ data });
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(method === 'HEAD' ? undefined : body);
+}
+
 async function handleIncidentRequest(
   req: IncomingMessage,
   res: ServerResponse,
   path: string,
   method: string,
-  store: IncidentRepository
+  store: IncidentRepository,
+  actor: string,
+  tenantId: string
 ): Promise<void> {
   if (path === '/api/v1/incidents' && method === 'GET') {
-    sendJson(res, 200, { data: await store.list() });
+    sendJson(res, 200, { data: await store.list(tenantId) });
     return;
   }
   if (path === '/api/v1/incidents' && method === 'POST') {
@@ -615,7 +836,8 @@ async function handleIncidentRequest(
           description: body.description as string | undefined,
           assignee: body.assignee as string | null | undefined,
         },
-        'api-key-user'
+        actor,
+        tenantId
       ),
     });
     return;
@@ -627,15 +849,15 @@ async function handleIncidentRequest(
   }
   const id = decodeURIComponent(match[1]);
   if (match[2] === 'events' && method === 'GET') {
-    if (!(await store.get(id))) {
+    if (!(await store.get(id, tenantId))) {
       sendJson(res, 404, { error: { code: 'not_found', message: `Incident ${id} not found` } });
       return;
     }
-    sendJson(res, 200, { data: await store.events(id) });
+    sendJson(res, 200, { data: await store.events(id, tenantId) });
     return;
   }
   if (!match[2] && method === 'GET') {
-    const incident = await store.get(id);
+    const incident = await store.get(id, tenantId);
     sendJson(
       res,
       incident ? 200 : 404,
@@ -683,7 +905,8 @@ async function handleIncidentRequest(
         status?: IncidentStatus;
         assignee?: string | null;
       },
-      'api-key-user'
+      actor,
+      tenantId
     );
     sendJson(
       res,
@@ -713,7 +936,13 @@ async function handleGraphRequest(
   path: string,
   method: string,
   graphStore: FalkorDBStore,
-  orgId: string
+  orgId: string,
+  graphOutbox?: { enqueue(event: GraphProjectionEvent): Promise<string> },
+  graphCatalogStore?: Pick<
+    PostgresGraphCatalogStore,
+    'upsertService' | 'linkDependency' | 'linkIncidentToService' | 'checkHealth'
+  >,
+  incidentStore?: IncidentRepository
 ): Promise<boolean> {
   const evidencePathMatch = path.match(/^\/api\/v1\/graph\/incidents\/([^/]+)\/evidence-paths$/);
   if (evidencePathMatch && method === 'GET') {
@@ -745,14 +974,23 @@ async function handleGraphRequest(
       });
       return true;
     }
-    await graphStore.upsertService({
+    const service = {
       orgId,
       id,
       name,
       serviceType: asOptionalString(body.serviceType),
       owner: asOptionalString(body.owner),
-    });
-    sendJson(res, 201, { data: { id, name } });
+    };
+    if (graphCatalogStore) {
+      await graphCatalogStore.upsertService(service);
+      sendJson(res, 202, { data: { id, name, projection: 'queued' } });
+    } else if (graphOutbox) {
+      const eventId = await graphOutbox.enqueue({ type: 'service.upsert', orgId, data: service });
+      sendJson(res, 202, { data: { id, name, projection: 'queued', eventId } });
+    } else {
+      await graphStore.upsertService(service);
+      sendJson(res, 201, { data: { id, name } });
+    }
     return true;
   }
 
@@ -770,7 +1008,7 @@ async function handleGraphRequest(
       });
       return true;
     }
-    const criticality = body.criticality;
+    const criticality = body.criticality as 'critical' | 'degraded' | 'optional' | undefined;
     if (
       criticality !== undefined &&
       criticality !== 'critical' &&
@@ -785,10 +1023,38 @@ async function handleGraphRequest(
       });
       return true;
     }
-    await graphStore.linkDependency({ orgId, dependentId, dependencyId, criticality });
-    sendJson(res, 201, {
-      data: { dependentId, dependencyId, criticality: criticality || 'degraded' },
-    });
+    const dependency = { orgId, dependentId, dependencyId, criticality };
+    if (graphCatalogStore) {
+      await graphCatalogStore.linkDependency(dependency);
+      sendJson(res, 202, {
+        data: {
+          dependentId,
+          dependencyId,
+          criticality: criticality || 'degraded',
+          projection: 'queued',
+        },
+      });
+    } else if (graphOutbox) {
+      const eventId = await graphOutbox.enqueue({
+        type: 'dependency.link',
+        orgId,
+        data: dependency,
+      });
+      sendJson(res, 202, {
+        data: {
+          dependentId,
+          dependencyId,
+          criticality: criticality || 'degraded',
+          projection: 'queued',
+          eventId,
+        },
+      });
+    } else {
+      await graphStore.linkDependency(dependency);
+      sendJson(res, 201, {
+        data: { dependentId, dependencyId, criticality: criticality || 'degraded' },
+      });
+    }
     return true;
   }
 
@@ -813,8 +1079,17 @@ async function handleGraphRequest(
       return true;
     }
     const incidentId = decodeURIComponent(incidentMatch[1]);
-    await graphStore.linkIncidentToService({ orgId, incidentId, title, serviceId });
-    sendJson(res, 201, { data: { incidentId, serviceId } });
+    if (incidentStore && !(await incidentStore.get(incidentId, orgId))) {
+      sendJson(res, 404, { error: { code: 'incident_not_found', message: 'Incident not found' } });
+      return true;
+    }
+    if (graphCatalogStore) {
+      await graphCatalogStore.linkIncidentToService({ orgId, incidentId, title, serviceId });
+      sendJson(res, 202, { data: { incidentId, serviceId, projection: 'queued' } });
+    } else {
+      await graphStore.linkIncidentToService({ orgId, incidentId, title, serviceId });
+      sendJson(res, 201, { data: { incidentId, serviceId } });
+    }
     return true;
   }
 
@@ -837,7 +1112,9 @@ async function handleWorkflowRequest(
   method: string,
   incidentStore: IncidentRepository | undefined,
   store: WorkflowRepository,
-  remediation: RemediationWorkflow
+  remediation: RemediationWorkflow,
+  actor: string,
+  tenantId: string
 ): Promise<void> {
   if (path === '/api/v1/evaluations/cases' && method === 'POST') {
     const body = await readJsonBody(req, res);
@@ -849,7 +1126,7 @@ async function handleWorkflowRequest(
       });
       return;
     }
-    const score = await store.recordEvaluation(input);
+    const score = await store.recordEvaluation(input, tenantId);
     sendJson(res, 201, {
       data: {
         dataset: input.dataset,
@@ -867,7 +1144,7 @@ async function handleWorkflowRequest(
       return;
     }
     sendJson(res, 200, {
-      data: await store.getEvaluationAnalytics(dataset),
+      data: await store.getEvaluationAnalytics(dataset, tenantId),
       meta: { provenance: 'caller_submitted_unverified' },
     });
     return;
@@ -879,7 +1156,7 @@ async function handleWorkflowRequest(
       return;
     }
     sendJson(res, 200, {
-      data: await store.listEvaluations(dataset),
+      data: await store.listEvaluations(dataset, tenantId),
       meta: { provenance: 'caller_submitted_unverified' },
     });
     return;
@@ -893,7 +1170,7 @@ async function handleWorkflowRequest(
       return;
     }
     const incidentId = decodeURIComponent(createMatch[1]);
-    if (!(await incidentStore.get(incidentId))) {
+    if (!(await incidentStore.get(incidentId, tenantId))) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Incident not found' } });
       return;
     }
@@ -910,11 +1187,11 @@ async function handleWorkflowRequest(
       });
       return;
     }
-    sendJson(res, 201, { data: await store.createPlan(incidentId, title, steps, 'api-key-user') });
+    sendJson(res, 201, { data: await store.createPlan(incidentId, title, steps, actor, tenantId) });
     return;
   }
   const planMatch = path.match(
-    /^\/api\/v1\/remediations\/([^/]+)(?:\/steps\/([^/]+)\/(approval|execute|rollback-approval|rollback))?$/
+    /^\/api\/v1\/remediations\/([^/]+)(?:\/steps\/([^/]+)\/(approval|execute|rollback-approval|rollback|reconcile))?$/
   );
   if (!planMatch) {
     sendJson(res, 404, { error: { code: 'not_found', message: `No route for ${method} ${path}` } });
@@ -924,20 +1201,54 @@ async function handleWorkflowRequest(
   const stepId = planMatch[2] ? decodeURIComponent(planMatch[2]) : undefined;
   const action = planMatch[3];
   if (!action && method === 'GET') {
-    const plan = await store.getPlan(planId);
+    const plan = await store.getPlan(planId, tenantId);
     if (!plan) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Remediation plan not found' } });
       return;
     }
-    sendJson(res, 200, { data: { ...plan, events: await store.events(planId) } });
+    sendJson(res, 200, { data: { ...plan, events: await store.events(planId, tenantId) } });
     return;
   }
   if (!stepId || method !== 'POST') {
     sendJson(res, 405, { error: { code: 'method_not_allowed', message: `${method} not allowed` } });
     return;
   }
+  if (action === 'reconcile') {
+    const body = await readJsonBody(req, res);
+    if (!body) return;
+    if (
+      (body.operation !== 'execute' && body.operation !== 'verify' && body.operation !== 'rollback') ||
+      typeof body.succeeded !== 'boolean' ||
+      !asNonEmptyString(body.evidence)
+    ) {
+      sendJson(res, 400, {
+        error: { code: 'bad_request', message: 'operation, succeeded, and evidence are required' },
+      });
+      return;
+    }
+    const updated = await store.resolveUnknown(
+      planId,
+      stepId,
+      body.operation,
+      body.succeeded,
+      body.evidence as string,
+      actor,
+      tenantId
+    );
+    if (!updated) {
+      sendJson(res, 409, { error: { code: 'workflow_conflict', message: 'No matching unknown outcome is available to reconcile' } });
+      return;
+    }
+    const reconciledPlan = await store.getPlan(planId, tenantId);
+    sendJson(res, 200, {
+      data: reconciledPlan
+        ? { ...reconciledPlan, events: await store.events(planId, tenantId) }
+        : undefined,
+    });
+    return;
+  }
   if (action === 'execute') {
-    const result = await remediation.execute(planId, stepId, 'api-key-user');
+    const result = await remediation.execute(planId, stepId, actor, tenantId);
     sendJson(
       res,
       result.executionSucceeded && result.verificationSucceeded
@@ -950,7 +1261,7 @@ async function handleWorkflowRequest(
     return;
   }
   if (action === 'rollback') {
-    const result = await remediation.rollback(planId, stepId, 'api-key-user');
+    const result = await remediation.rollback(planId, stepId, actor, tenantId);
     sendJson(res, result.status === 'rolled_back' ? 200 : 502, { data: result });
     return;
   }
@@ -967,8 +1278,15 @@ async function handleWorkflowRequest(
       return;
     }
     const plan = await (action === 'approval'
-      ? store.decide(planId, stepId, body.decision, 'api-key-user', body.reason as string)
-      : store.decideRollback(planId, stepId, body.decision, 'api-key-user', body.reason as string));
+      ? store.decide(planId, stepId, body.decision, actor, body.reason as string, tenantId)
+      : store.decideRollback(
+          planId,
+          stepId,
+          body.decision,
+          actor,
+          body.reason as string,
+          tenantId
+        ));
     if (!plan) {
       sendJson(res, 404, {
         error: { code: 'not_found', message: 'Remediation plan or step not found' },

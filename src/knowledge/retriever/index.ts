@@ -37,26 +37,83 @@ export interface RetrieverConfig {
   ftsWeight?: number;
   vectorWeight?: number;
   rrfK?: number;
+  stores?: RetrieverStores;
+}
+
+type MaybeAsync<T> = T | Promise<T>;
+interface KnowledgeStorePort {
+  upsertDocument(doc: KnowledgeDocument): MaybeAsync<void>;
+  search(
+    query: string,
+    options?: { typeFilter?: KnowledgeType[]; serviceFilter?: string[]; limit?: number }
+  ): MaybeAsync<import('../types').RetrievedChunk[]>;
+  getDocument(id: string): MaybeAsync<KnowledgeDocument | null>;
+  getDocumentCount(): MaybeAsync<number>;
+  getDocumentCountsByType(): MaybeAsync<Record<KnowledgeType, number>>;
+  getAllDocuments(): MaybeAsync<KnowledgeDocument[]>;
+  deleteDocument(id: string): MaybeAsync<void>;
+  close(): void;
+}
+interface VectorStorePort {
+  addChunks(
+    chunks: Array<{
+      chunk: import('../types').KnowledgeChunk;
+      documentTitle: string;
+      type: KnowledgeType;
+      services: string[];
+    }>
+  ): Promise<void>;
+  search(
+    query: string,
+    options?: {
+      topK?: number;
+      typeFilter?: KnowledgeType[];
+      serviceFilter?: string[];
+      minScore?: number;
+    }
+  ): Promise<import('../types').RetrievedChunk[]>;
+  deleteDocument(documentId: string): MaybeAsync<void>;
+  hasDocument(documentId: string): MaybeAsync<boolean>;
+  getCount?(): MaybeAsync<number>;
+  close(): void;
+}
+export interface RetrieverStores {
+  knowledge: KnowledgeStorePort;
+  vector?: VectorStorePort;
 }
 
 export class KnowledgeRetriever {
-  private store: KnowledgeStore;
-  private vectorStore: VectorStore | null = null;
+  private store: KnowledgeStorePort;
+  private vectorStore: VectorStorePort | null = null;
   private config: RetrieverConfig;
   private initialized = false;
   private vectorSearchEnabled = true;
 
+  /** Check that each configured persistence backend accepts a basic read. */
+  async checkHealth(): Promise<{ knowledgeStore: boolean; vectorStore?: boolean }> {
+    const knowledgeStore = await this.store.getDocumentCount();
+    const vectorStore = this.vectorStore?.getCount ? await this.vectorStore.getCount() : undefined;
+    return {
+      knowledgeStore: Number.isFinite(knowledgeStore),
+      ...(this.vectorStore ? { vectorStore: Number.isFinite(vectorStore) } : {}),
+    };
+  }
+
   constructor(config: RetrieverConfig) {
     this.config = config;
 
-    const storeDir = dirname(resolve(config.storePath));
-    if (!existsSync(storeDir)) {
-      mkdirSync(storeDir, { recursive: true });
+    if (!config.stores) {
+      const storeDir = dirname(resolve(config.storePath));
+      if (!existsSync(storeDir)) {
+        mkdirSync(storeDir, { recursive: true });
+      }
     }
 
-    this.store = new KnowledgeStore(config.storePath);
+    this.store = config.stores?.knowledge ?? new KnowledgeStore(config.storePath);
 
-    if (isEmbedderConfigured()) {
+    if (config.stores?.vector) {
+      this.vectorStore = config.stores.vector;
+    } else if (!config.stores && isEmbedderConfigured()) {
       const vectorPath = this.resolveVectorStorePath(config.storePath, config.vectorStorePath);
       const vectorDir = dirname(resolve(vectorPath));
       if (!existsSync(vectorDir)) {
@@ -85,14 +142,14 @@ export class KnowledgeRetriever {
       const documents = await loadFromSource(source, { since: lastSync });
 
       for (const doc of documents) {
-        const existing = this.store.getDocument(doc.id);
+        const existing = await this.store.getDocument(doc.id);
         if (existing) {
           updated++;
         } else {
           added++;
         }
 
-        this.store.upsertDocument(doc);
+        await this.store.upsertDocument(doc);
         await this.indexDocumentEmbeddings(doc, existing);
       }
 
@@ -115,7 +172,7 @@ export class KnowledgeRetriever {
       return;
     }
 
-    const hasEmbeddings = this.vectorStore.hasDocument(doc.id);
+    const hasEmbeddings = await this.vectorStore.hasDocument(doc.id);
     const unchanged =
       Boolean(existing) &&
       existing?.updatedAt === doc.updatedAt &&
@@ -127,7 +184,7 @@ export class KnowledgeRetriever {
     }
 
     try {
-      this.vectorStore.deleteDocument(doc.id);
+      await this.vectorStore.deleteDocument(doc.id);
       if (doc.chunks.length === 0) {
         return;
       }
@@ -153,7 +210,7 @@ export class KnowledgeRetriever {
    * Initialize if not already done
    */
   async ensureInitialized(): Promise<void> {
-    if (!this.initialized && this.store.getDocumentCount() === 0) {
+    if (!this.initialized && (await this.store.getDocumentCount()) === 0) {
       await this.sync();
     }
     this.initialized = true;
@@ -187,7 +244,7 @@ export class KnowledgeRetriever {
     const rerank = options.rerank ?? this.config.rerank ?? true;
     const fusionLimit = Math.max(limit, Math.min(limit * 3, 100));
 
-    const ftsResults = this.store.search(trimmedQuery, {
+    const ftsResults = await this.store.search(trimmedQuery, {
       typeFilter: options.typeFilter,
       serviceFilter: options.serviceFilter,
       limit: fusionLimit,
@@ -244,13 +301,13 @@ export class KnowledgeRetriever {
 
   private combineHybridResults(
     query: string,
-    ftsResults: ReturnType<KnowledgeStore['search']>,
+    ftsResults: import('../types').RetrievedChunk[],
     vectorResults: Awaited<ReturnType<VectorStore['search']>>,
     options: {
       topK: number;
       serviceFilter?: string[];
     }
-  ): ReturnType<KnowledgeStore['search']> {
+  ): import('../types').RetrievedChunk[] {
     const rrfK = this.config.rrfK ?? DEFAULT_RRF_K;
     const ftsWeight = this.config.ftsWeight ?? DEFAULT_FTS_WEIGHT;
     const vectorWeight = this.config.vectorWeight ?? DEFAULT_VECTOR_WEIGHT;
@@ -259,7 +316,7 @@ export class KnowledgeRetriever {
     const merged = new Map<
       string,
       {
-        chunk: ReturnType<KnowledgeStore['search']>[number];
+        chunk: import('../types').RetrievedChunk;
         score: number;
       }
     >();
@@ -349,43 +406,46 @@ export class KnowledgeRetriever {
   /**
    * Get document count
    */
-  getDocumentCount(): number {
+  async getDocumentCount(): Promise<number> {
     return this.store.getDocumentCount();
   }
 
   /**
    * Get document counts grouped by type.
    */
-  getDocumentCountsByType(): Record<KnowledgeType, number> {
+  async getDocumentCountsByType(): Promise<Record<KnowledgeType, number>> {
     return this.store.getDocumentCountsByType();
   }
 
   /**
    * Get all stored documents.
    */
-  getAllDocuments(): KnowledgeDocument[] {
+  async getAllDocuments(): Promise<KnowledgeDocument[]> {
     return this.store.getAllDocuments();
   }
 
   /**
    * Get a single document by ID.
    */
-  getDocument(id: string): KnowledgeDocument | null {
+  async getDocument(id: string): Promise<KnowledgeDocument | null> {
     return this.store.getDocument(id);
   }
 
   /**
    * Insert or update a document.
    */
-  upsertDocument(doc: KnowledgeDocument): void {
-    this.store.upsertDocument(doc);
+  async upsertDocument(doc: KnowledgeDocument): Promise<void> {
+    const existing = await this.store.getDocument(doc.id);
+    await this.store.upsertDocument(doc);
+    await this.indexDocumentEmbeddings(doc, existing);
   }
 
   /**
    * Delete a document by ID.
    */
-  deleteDocument(id: string): void {
-    this.store.deleteDocument(id);
+  async deleteDocument(id: string): Promise<void> {
+    await this.vectorStore?.deleteDocument(id);
+    await this.store.deleteDocument(id);
   }
 
   /**
@@ -663,14 +723,19 @@ export function createRetriever(baseDir: string = '.runbook'): KnowledgeRetrieve
  */
 export async function createConfiguredRetriever(
   baseDir: string = '.runbook',
-  runtimeConfig?: Config
+  runtimeConfig?: Config,
+  stores?: RetrieverStores
 ): Promise<IKnowledgeRetriever> {
   const configPath = resolveConfigPathForBaseDir(baseDir);
   const config = runtimeConfig ?? (await loadConfig(configPath));
 
   // Remote mode: delegate to server
   if (config.server?.url) {
-    const apiKey = process.env.TRACEMIND_SERVER_API_KEY || process.env.RUNBOOK_SERVER_API_KEY || config.server.apiKey || '';
+    const apiKey =
+      process.env.TRACEMIND_SERVER_API_KEY ||
+      process.env.RUNBOOK_SERVER_API_KEY ||
+      config.server.apiKey ||
+      '';
     const { RemoteKnowledgeRetriever } = await import('./remote');
     return new RemoteKnowledgeRetriever(config.server.url, apiKey);
   }
@@ -694,6 +759,7 @@ export async function createConfiguredRetriever(
   return new KnowledgeRetriever({
     storePath,
     vectorStorePath,
+    stores,
     sources,
     defaultTopK: config.knowledge.retrieval.topK,
     rerank: config.knowledge.retrieval.rerank,

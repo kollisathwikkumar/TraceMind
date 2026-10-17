@@ -46,11 +46,11 @@ export type IncidentPatch = Partial<
 /** Persistence contract shared by the local SQLite and hosted PostgreSQL adapters. */
 export interface IncidentRepository {
   checkHealth(): Awaitable<void>;
-  list(): Awaitable<Incident[]>;
-  get(id: string): Awaitable<Incident | undefined>;
-  events(id: string): Awaitable<IncidentEvent[]>;
-  create(input: IncidentInput, actor?: string): Awaitable<Incident>;
-  update(id: string, patch: IncidentPatch, actor: string): Awaitable<Incident | undefined>;
+  list(tenantId?: string): Awaitable<Incident[]>;
+  get(id: string, tenantId?: string): Awaitable<Incident | undefined>;
+  events(id: string, tenantId?: string): Awaitable<IncidentEvent[]>;
+  create(input: IncidentInput, actor?: string, tenantId?: string): Awaitable<Incident>;
+  update(id: string, patch: IncidentPatch, actor: string, tenantId?: string): Awaitable<Incident | undefined>;
   close(): Awaitable<void>;
 }
 
@@ -64,35 +64,40 @@ export class IncidentStore {
         id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
         severity TEXT NOT NULL CHECK(severity IN ('SEV-1','SEV-2','SEV-3','SEV-4')),
         status TEXT NOT NULL CHECK(status IN ('open','investigating','mitigated','resolved')),
+        tenant_id TEXT NOT NULL DEFAULT 'default',
         assignee TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS incident_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id TEXT NOT NULL REFERENCES incidents(id),
-        action TEXT NOT NULL, detail TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
+        tenant_id TEXT NOT NULL DEFAULT 'default', action TEXT NOT NULL, detail TEXT NOT NULL,
+        actor TEXT NOT NULL, created_at TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS incident_events_incident_id ON incident_events(incident_id, id);
+    `);
+    ensureTenantColumn(this.db, 'incidents');
+    ensureTenantColumn(this.db, 'incident_events');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS incidents_tenant_updated ON incidents(tenant_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS incident_events_incident_id ON incident_events(tenant_id, incident_id, id);
     `);
   }
   checkHealth(): void {
     this.db.prepare('SELECT 1').get();
   }
-  list(): Incident[] {
-    return (this.db.prepare('SELECT * FROM incidents ORDER BY updated_at DESC').all() as Row[]).map(
-      mapIncident
-    );
+  list(tenantId = 'default'): Incident[] {
+    return (this.db.prepare('SELECT * FROM incidents WHERE tenant_id = ? ORDER BY updated_at DESC').all(tenantId) as Row[]).map(mapIncident);
   }
-  get(id: string): Incident | undefined {
-    const row = this.db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) as Row | undefined;
+  get(id: string, tenantId = 'default'): Incident | undefined {
+    const row = this.db.prepare('SELECT * FROM incidents WHERE id = ? AND tenant_id = ?').get(id, tenantId) as Row | undefined;
     return row ? mapIncident(row) : undefined;
   }
-  events(id: string): IncidentEvent[] {
+  events(id: string, tenantId = 'default'): IncidentEvent[] {
     return (
       this.db
-        .prepare('SELECT * FROM incident_events WHERE incident_id = ? ORDER BY id')
-        .all(id) as EventRow[]
+        .prepare('SELECT * FROM incident_events WHERE incident_id = ? AND tenant_id = ? ORDER BY id')
+        .all(id, tenantId) as EventRow[]
     ).map(mapEvent);
   }
-  create(input: IncidentInput, actor = 'system'): Incident {
+  create(input: IncidentInput, actor = 'system', tenantId = 'default'): Incident {
     const now = new Date().toISOString();
     const incident: Incident = {
       id: randomUUID(),
@@ -106,21 +111,23 @@ export class IncidentStore {
     };
     const transaction = this.db.transaction(() => {
       this.db
-        .prepare('INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .prepare('INSERT INTO incidents (id,title,description,severity,status,tenant_id,assignee,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(
           incident.id,
           incident.title,
           incident.description,
           incident.severity,
           incident.status,
+          tenantId,
           incident.assignee,
           incident.createdAt,
           incident.updatedAt
         );
-      this.addEvent(incident.id, 'created', `Created ${incident.severity} incident`, actor, now);
+      this.addEvent(incident.id, tenantId, 'created', `Created ${incident.severity} incident`, actor, now);
       if (incident.assignee)
         this.addEvent(
           incident.id,
+          tenantId,
           'assignee_changed',
           `Assigned to ${incident.assignee}`,
           actor,
@@ -130,8 +137,8 @@ export class IncidentStore {
     transaction();
     return incident;
   }
-  update(id: string, patch: IncidentPatch, actor: string): Incident | undefined {
-    const current = this.get(id);
+  update(id: string, patch: IncidentPatch, actor: string, tenantId = 'default'): Incident | undefined {
+    const current = this.get(id, tenantId);
     if (!current) return undefined;
     const next = {
       ...current,
@@ -150,7 +157,7 @@ export class IncidentStore {
     const transaction = this.db.transaction(() => {
       this.db
         .prepare(
-          'UPDATE incidents SET title=?, description=?, severity=?, status=?, assignee=?, updated_at=? WHERE id=?'
+          'UPDATE incidents SET title=?, description=?, severity=?, status=?, assignee=?, updated_at=? WHERE id=? AND tenant_id=?'
         )
         .run(
           next.title.trim(),
@@ -159,7 +166,8 @@ export class IncidentStore {
           next.status,
           next.assignee,
           now,
-          id
+          id,
+          tenantId
         );
       for (const field of fields) {
         if (next[field] !== current[field]) {
@@ -170,18 +178,19 @@ export class IncidentStore {
                 ? 'assignee_changed'
                 : `${field}_changed`;
           const value = next[field] || '(unassigned)';
-          this.addEvent(id, action, `${field} changed to ${value}`, actor, now);
+          this.addEvent(id, tenantId, action, `${field} changed to ${value}`, actor, now);
         }
       }
     });
     transaction();
-    return this.get(id);
+    return this.get(id, tenantId);
   }
   close(): void {
     this.db.close();
   }
   private addEvent(
     incidentId: string,
+    tenantId: string,
     action: string,
     detail: string,
     actor: string,
@@ -189,9 +198,16 @@ export class IncidentStore {
   ): void {
     this.db
       .prepare(
-        'INSERT INTO incident_events (incident_id, action, detail, actor, created_at) VALUES (?, ?, ?, ?, ?)'
+        'INSERT INTO incident_events (incident_id, tenant_id, action, detail, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)'
       )
-      .run(incidentId, action, detail, actor, at);
+      .run(incidentId, tenantId, action, detail, actor, at);
+  }
+}
+
+function ensureTenantColumn(db: Database.Database, table: 'incidents' | 'incident_events'): void {
+  const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'tenant_id')) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'`);
   }
 }
 type Row = {
