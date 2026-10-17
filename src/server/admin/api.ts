@@ -19,6 +19,11 @@ export interface LLMValidationResult {
   response: string;
   checkedAt: string;
   usedFallback?: boolean;
+  credentialSource?: 'primary' | 'fallback';
+  primaryFailure?: {
+    category: string;
+    status?: number;
+  };
 }
 
 export interface Incident {
@@ -210,8 +215,10 @@ export class AdminApi {
     return this.request('DELETE', '/api/v1/settings/provider-key');
   }
 
-  validateLLM(): Promise<LLMValidationResult> {
-    return this.request('POST', '/api/v1/llm/validate', {});
+  validateLLM(
+    credentialSource: 'auto' | 'primary' | 'fallback' = 'auto'
+  ): Promise<LLMValidationResult> {
+    return this.request('POST', '/api/v1/llm/validate', { credentialSource });
   }
 
   getStats(): Promise<Record<string, number>> {

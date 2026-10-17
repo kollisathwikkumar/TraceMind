@@ -1,5 +1,15 @@
 import { useEffect, useState } from 'react';
-import type { AdminApi, HealthData, Incident } from '../api';
+import type { AdminApi, HealthData, Incident, LLMValidationResult } from '../api';
+
+export function formatValidationStatus(modelCheck: LLMValidationResult): string {
+  if (modelCheck.credentialSource === 'primary') return 'primary key validated';
+  if (modelCheck.credentialSource === 'fallback' && !modelCheck.primaryFailure)
+    return 'fallback key validated independently';
+  if (!modelCheck.usedFallback) return 'primary provider used';
+  const category = modelCheck.primaryFailure?.category?.replaceAll('_', ' ') ?? 'failed';
+  const status = modelCheck.primaryFailure?.status;
+  return `fallback provider used (primary: ${category}${status ? `, HTTP ${status}` : ''})`;
+}
 
 export function Dashboard({ api }: { api: AdminApi }) {
   const [health, setHealth] = useState<HealthData | null>(null);
@@ -7,11 +17,7 @@ export function Dashboard({ api }: { api: AdminApi }) {
   const [services, setServices] = useState<string[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [error, setError] = useState('');
-  const [modelCheck, setModelCheck] = useState<{
-    provider: string;
-    model: string;
-    response: string;
-  } | null>(null);
+  const [modelCheck, setModelCheck] = useState<LLMValidationResult | null>(null);
   const [modelCheckError, setModelCheckError] = useState('');
   const [checkingModel, setCheckingModel] = useState(false);
   useEffect(() => {
@@ -33,6 +39,16 @@ export function Dashboard({ api }: { api: AdminApi }) {
   const active = incidents.filter((i) => i.status !== 'resolved');
   const critical = active.filter((i) => i.severity === 'SEV-1').length;
   const totalDocs = Object.values(stats || {}).reduce((sum, n) => sum + n, 0);
+  const testModel = (credentialSource: 'auto' | 'primary' | 'fallback') => {
+    setCheckingModel(true);
+    setModelCheck(null);
+    setModelCheckError('');
+    void api
+      .validateLLM(credentialSource)
+      .then(setModelCheck)
+      .catch((e: Error) => setModelCheckError(e.message))
+      .finally(() => setCheckingModel(false));
+  };
   if (error)
     return (
       <div className="notice notice-error" role="alert">
@@ -125,31 +141,45 @@ export function Dashboard({ api }: { api: AdminApi }) {
             <span className="eyebrow">MODEL CONNECTIVITY</span>
             <h2 id="model-check-title">Validate AI response</h2>
           </div>
-          <button
-            className="btn btn-primary"
-            type="button"
-            disabled={checkingModel}
-            onClick={() => {
-              setCheckingModel(true);
-              setModelCheck(null);
-              setModelCheckError('');
-              void api
-                .validateLLM()
-                .then(setModelCheck)
-                .catch((e: Error) => setModelCheckError(e.message))
-                .finally(() => setCheckingModel(false));
-            }}
+          <div
+            className="button-row"
+            style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}
           >
-            {checkingModel ? 'Checking provider…' : 'Test model connection'}
-          </button>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={checkingModel}
+              onClick={() => testModel('auto')}
+            >
+              {checkingModel ? 'Checking provider…' : 'Test model connection'}
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              disabled={checkingModel}
+              onClick={() => testModel('primary')}
+            >
+              Test primary key only
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              disabled={checkingModel}
+              onClick={() => testModel('fallback')}
+            >
+              Test fallback key only
+            </button>
+          </div>
         </div>
         <p className="muted">
-          Sends a short test prompt to the configured provider and displays its actual response.
+          Sends a short prompt to the selected configured key and displays the actual response. The
+          primary and fallback checks run independently and never switch credentials.
         </p>
         {modelCheck && (
           <div className="notice" role="status">
             Connected to {modelCheck.provider} · {modelCheck.model}
-            {modelCheck.usedFallback ? ' · fallback provider used' : ''}
+            {' · '}
+            {formatValidationStatus(modelCheck)}
             <p>{modelCheck.response}</p>
           </div>
         )}

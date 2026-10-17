@@ -75,7 +75,12 @@ export interface RouterConfig {
   /** Maximum time a readiness dependency may take before it is unhealthy. */
   healthCheckTimeoutMs?: number;
   /** Override the provider request in route-level tests. */
-  validateLLM?: () => Promise<{ content: string }>;
+  validateLLM?: (credentialSource?: 'auto' | 'primary' | 'fallback') => Promise<{
+    content: string;
+    usedFallback?: boolean;
+    credentialSource?: 'primary' | 'fallback';
+    primaryFailure?: { source: 'primary'; category: string; status?: number };
+  }>;
 }
 
 export function createRouter(routerConfig: RouterConfig) {
@@ -395,9 +400,33 @@ export function createRouter(routerConfig: RouterConfig) {
         return;
       }
       try {
+        let credentialSource: 'auto' | 'primary' | 'fallback' = 'auto';
+        const hasBody =
+          Number(req.headers['content-length'] || 0) > 0 || !!req.headers['transfer-encoding'];
+        if (hasBody) {
+          const body = await readJsonBody(req, res);
+          if (!body) return;
+          if (
+            Object.keys(body).some((key) => key !== 'credentialSource') ||
+            (body.credentialSource !== undefined &&
+              body.credentialSource !== 'auto' &&
+              body.credentialSource !== 'primary' &&
+              body.credentialSource !== 'fallback')
+          ) {
+            sendJson(res, 400, {
+              error: {
+                code: 'bad_request',
+                message: 'credentialSource must be auto, primary, or fallback',
+              },
+            });
+            return;
+          }
+          credentialSource =
+            (body.credentialSource as typeof credentialSource | undefined) ?? 'auto';
+        }
         const validation = routerConfig.validateLLM
-          ? { ...(await routerConfig.validateLLM()), usedFallback: false }
-          : await validateLLMProvider(config);
+          ? await routerConfig.validateLLM(credentialSource)
+          : await validateLLMProvider(config, process.env, credentialSource);
         const result = validation;
         const response = result.content.trim();
         if (!response) {
@@ -409,7 +438,11 @@ export function createRouter(routerConfig: RouterConfig) {
             provider: config.llm.provider,
             model: config.llm.model,
             response: response.slice(0, 2000),
-            usedFallback: validation.usedFallback,
+            usedFallback: validation.usedFallback ?? false,
+            ...(validation.credentialSource
+              ? { credentialSource: validation.credentialSource }
+              : {}),
+            ...(validation.primaryFailure ? { primaryFailure: validation.primaryFailure } : {}),
             checkedAt: new Date().toISOString(),
           },
         });

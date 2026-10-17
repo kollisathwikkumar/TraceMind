@@ -17,7 +17,11 @@ let workflowStore: WorkflowStore | undefined;
 let dir: string | undefined;
 async function startApi(
   config = DEFAULT_CONFIG,
-  validateLLM?: () => Promise<{ content: string }>,
+  validateLLM?: (credentialSource?: 'auto' | 'primary' | 'fallback') => Promise<{
+    content: string;
+    usedFallback?: boolean;
+    primaryFailure?: { source: 'primary'; category: string; status?: number };
+  }>,
   extras: Partial<RouterConfig> = {}
 ) {
   dir = mkdtempSync(join(tmpdir(), 'tracemind-api-'));
@@ -559,6 +563,78 @@ describe('incident API', () => {
     expect(validateLLM).toHaveBeenCalledOnce();
   });
 
+  it('returns only sanitized primary failure metadata when fallback validates successfully', async () => {
+    const validateLLM = vi.fn().mockImplementation((credentialSource = 'auto') =>
+      Promise.resolve({
+        content: 'TraceMind model connection successful.',
+        usedFallback: true,
+        credentialSource: credentialSource === 'auto' ? 'fallback' : credentialSource,
+        primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
+      })
+    );
+    const base = await startApi(DEFAULT_CONFIG, validateLLM);
+    const response = await fetch(`${base}/api/v1/llm/validate`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-key' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: {
+        status: 'connected',
+        response: 'TraceMind model connection successful.',
+        usedFallback: true,
+        credentialSource: 'fallback',
+        primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
+      },
+    });
+  });
+
+  it('passes an explicit credential source through the protected validation route', async () => {
+    const validateLLM = vi.fn().mockResolvedValue({
+      content: 'primary response',
+      usedFallback: false,
+      credentialSource: 'primary',
+    });
+    const base = await startApi(DEFAULT_CONFIG, validateLLM);
+    const response = await fetch(`${base}/api/v1/llm/validate`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-key',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ credentialSource: 'primary' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(validateLLM).toHaveBeenCalledExactlyOnceWith('primary');
+    expect(await response.json()).toMatchObject({
+      data: { status: 'connected', credentialSource: 'primary', usedFallback: false },
+    });
+  });
+
+  it('rejects unknown validation modes without calling a provider', async () => {
+    const validateLLM = vi.fn();
+    const base = await startApi(DEFAULT_CONFIG, validateLLM);
+    const response = await fetch(`${base}/api/v1/llm/validate`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-key',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ credentialSource: 'primary-and-fallback' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: 'bad_request',
+        message: 'credentialSource must be auto, primary, or fallback',
+      },
+    });
+    expect(validateLLM).not.toHaveBeenCalled();
+  });
+
   it('does not return provider exception details from LLM validation', async () => {
     const validateLLM = vi.fn().mockRejectedValue(new Error('unauthorized; token=provider-secret'));
     const base = await startApi(DEFAULT_CONFIG, validateLLM);
@@ -783,36 +859,87 @@ describe('incident API', () => {
     const ambiguous = workflowStore!.createPlan(
       incident.id,
       'Reconcile uncertain broker outcome',
-      [{ actionId: 'worker.restart', postCheckId: 'worker.health', rollbackActionId: 'worker.restore', description: 'Ambiguous action' }],
+      [
+        {
+          actionId: 'worker.restart',
+          postCheckId: 'worker.health',
+          rollbackActionId: 'worker.restore',
+          description: 'Ambiguous action',
+        },
+      ],
       'proposer'
     );
     const ambiguousStep = ambiguous.steps[0];
-    workflowStore!.decide(ambiguous.id, ambiguousStep.id, 'approve', 'approver', 'Approved for test');
+    workflowStore!.decide(
+      ambiguous.id,
+      ambiguousStep.id,
+      'approve',
+      'approver',
+      'Approved for test'
+    );
     workflowStore!.beginExecution(ambiguous.id, ambiguousStep.id, 'executor', 'ambiguous-lease');
     workflowStore!.reconcileExpiredLeases('system', new Date(Date.now() + 120_000), 'default');
     const reconcileUrl = `${base}/api/v1/remediations/${ambiguous.id}/steps/${ambiguousStep.id}/reconcile`;
-    expect((await fetch(reconcileUrl, {
-      method: 'POST',
-      headers: auth0Headers('readOnlyReconciler'),
-      body: JSON.stringify({ operation: 'execute', succeeded: true, evidence: 'broker key checked' }),
-    })).status).toBe(403);
+    expect(
+      (
+        await fetch(reconcileUrl, {
+          method: 'POST',
+          headers: auth0Headers('readOnlyReconciler'),
+          body: JSON.stringify({
+            operation: 'execute',
+            succeeded: true,
+            evidence: 'broker key checked',
+          }),
+        })
+      ).status
+    ).toBe(403);
     const reconciled = await fetch(reconcileUrl, {
       method: 'POST',
       headers: auth0Headers('reconciler'),
-      body: JSON.stringify({ operation: 'execute', succeeded: true, evidence: 'Broker idempotency key and independent post-check confirmed action' }),
+      body: JSON.stringify({
+        operation: 'execute',
+        succeeded: true,
+        evidence: 'Broker idempotency key and independent post-check confirmed action',
+      }),
     });
     expect(reconciled.status).toBe(200);
-    expect(((await reconciled.json()) as { data: { steps: { status: string }[]; events: { action: string; actor: string }[] } }).data).toMatchObject({
+    expect(
+      (
+        (await reconciled.json()) as {
+          data: { steps: { status: string }[]; events: { action: string; actor: string }[] };
+        }
+      ).data
+    ).toMatchObject({
       steps: [{ status: 'execution_succeeded' }],
-      events: expect.arrayContaining([expect.objectContaining({ action: 'execute_reconciled', actor: 'auth0:incident-responder' })]),
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          action: 'execute_reconciled',
+          actor: 'auth0:incident-responder',
+        }),
+      ]),
     });
 
-    const uncertainCheck = workflowStore!.createPlan(incident.id, 'Unknown post-check', [
-      { actionId: 'worker.restart', postCheckId: 'worker.health', rollbackActionId: 'worker.restore', description: 'Check outcome lost' },
-    ], 'proposer');
+    const uncertainCheck = workflowStore!.createPlan(
+      incident.id,
+      'Unknown post-check',
+      [
+        {
+          actionId: 'worker.restart',
+          postCheckId: 'worker.health',
+          rollbackActionId: 'worker.restore',
+          description: 'Check outcome lost',
+        },
+      ],
+      'proposer'
+    );
     const checkStep = uncertainCheck.steps[0];
     workflowStore!.decide(uncertainCheck.id, checkStep.id, 'approve', 'approver', 'Approved');
-    workflowStore!.beginExecution(uncertainCheck.id, checkStep.id, 'executor', 'verify-route-lease');
+    workflowStore!.beginExecution(
+      uncertainCheck.id,
+      checkStep.id,
+      'executor',
+      'verify-route-lease'
+    );
     workflowStore!.setExecution(
       uncertainCheck.id,
       checkStep.id,
@@ -827,11 +954,18 @@ describe('incident API', () => {
       {
         method: 'POST',
         headers: auth0Headers('reconciler'),
-        body: JSON.stringify({ operation: 'verify', succeeded: true, evidence: 'Independent health check succeeded' }),
+        body: JSON.stringify({
+          operation: 'verify',
+          succeeded: true,
+          evidence: 'Independent health check succeeded',
+        }),
       }
     );
     expect(verifyReconciled.status).toBe(200);
-    expect(((await verifyReconciled.json()) as { data: { steps: { status: string }[] } }).data.steps[0].status).toBe('verified');
+    expect(
+      ((await verifyReconciled.json()) as { data: { steps: { status: string }[] } }).data.steps[0]
+        .status
+    ).toBe('verified');
   });
 
   it('stores paired known-case evaluation results and serves aggregate analytics', async () => {

@@ -8,9 +8,13 @@ const VALIDATION_USER_PROMPT = 'Reply with exactly: TraceMind model connection s
 export interface LLMValidationResponse {
   content: string;
   usedFallback: boolean;
+  credentialSource: 'primary' | 'fallback';
+  /** Sanitized primary-key failure, present only when fallback answered. */
+  primaryFailure?: LLMProviderAttemptFailure;
 }
 
 export type LLMProviderFailureCategory =
+  | 'missing_key'
   | 'unauthorized'
   | 'forbidden'
   | 'not_found'
@@ -108,7 +112,8 @@ export function formatLLMValidationFailure(attempts: LLMProviderAttemptFailure[]
 /** Run the fixed validation prompt with the configured key, then the optional fallback key. */
 export async function validateLLMProvider(
   config: Config,
-  environment: NodeJS.ProcessEnv = process.env
+  environment: NodeJS.ProcessEnv = process.env,
+  credentialSource: 'auto' | 'primary' | 'fallback' = 'auto'
 ): Promise<LLMValidationResponse> {
   const base = {
     ...config.llm,
@@ -141,15 +146,40 @@ export async function validateLLMProvider(
     return content;
   };
 
+  // Explicit key checks are single-attempt by design: validating one secret
+  // must never silently succeed by switching to the other credential.
+  if (credentialSource !== 'auto') {
+    const selectedKey = credentialSource === 'primary' ? primaryKey : fallbackKey;
+    if (!selectedKey) {
+      throw new LLMValidationError([{ source: credentialSource, category: 'missing_key' }]);
+    }
+    try {
+      return {
+        content: await runAttempt(selectedKey),
+        usedFallback: credentialSource === 'fallback',
+        credentialSource,
+      };
+    } catch (error) {
+      throw new LLMValidationError([classifyLLMProviderFailure(error, credentialSource)]);
+    }
+  }
+
   try {
     const content = await runAttempt(primaryKey);
-    return { content, usedFallback: false };
+    return { content, usedFallback: false, credentialSource: 'primary' };
   } catch (primaryError) {
     const attempts = [classifyLLMProviderFailure(primaryError, 'primary')];
     if (!fallbackKey || fallbackKey === primaryKey) throw new LLMValidationError(attempts);
     try {
       const content = await runAttempt(fallbackKey);
-      return { content, usedFallback: true };
+      // Keep the successful fallback result while exposing only the
+      // allowlisted primary failure category/status for key diagnosis.
+      return {
+        content,
+        usedFallback: true,
+        credentialSource: 'fallback',
+        primaryFailure: attempts[0],
+      };
     } catch (fallbackError) {
       attempts.push(classifyLLMProviderFailure(fallbackError, 'fallback'));
       throw new LLMValidationError(attempts);

@@ -26,7 +26,11 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     createLLMClient
-      .mockReturnValueOnce({ chat: vi.fn().mockRejectedValue(new Error('primary unavailable')) })
+      .mockReturnValueOnce({
+        chat: vi
+          .fn()
+          .mockRejectedValue(new Error('LLM API error (provider/model): 401 secret-primary')),
+      })
       .mockReturnValueOnce({
         chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
       });
@@ -34,6 +38,8 @@ describe('LLM validation fallback', () => {
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
       content: 'fallback response',
       usedFallback: true,
+      credentialSource: 'fallback',
+      primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
     });
     expect(createLLMClient).toHaveBeenNthCalledWith(
       1,
@@ -57,6 +63,8 @@ describe('LLM validation fallback', () => {
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
       content: 'fallback response',
       usedFallback: true,
+      credentialSource: 'fallback',
+      primaryFailure: { source: 'primary', category: 'empty_response' },
     });
     expect(createLLMClient).toHaveBeenCalledTimes(2);
   });
@@ -158,6 +166,7 @@ describe('LLM validation fallback', () => {
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
       content: 'primary response',
       usedFallback: false,
+      credentialSource: 'primary',
     });
     expect(createLLMClient).toHaveBeenCalledOnce();
   });
@@ -202,7 +211,9 @@ describe('LLM validation fallback', () => {
 
   it('allows enough reasoning output for hosted OpenAI-compatible providers', async () => {
     createLLMClient.mockReturnValue({
-      chat: vi.fn().mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
     });
     const compatibleConfig = {
       ...DEFAULT_CONFIG,
@@ -219,6 +230,7 @@ describe('LLM validation fallback', () => {
     ).resolves.toEqual({
       content: 'TraceMind model connection successful.',
       usedFallback: false,
+      credentialSource: 'primary',
     });
     expect(createLLMClient).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -228,5 +240,56 @@ describe('LLM validation fallback', () => {
         apiKey: 'primary-test-key',
       })
     );
+  });
+
+  it('validates the primary key only and never invokes fallback after primary failure', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    const primaryChat = vi.fn().mockRejectedValue(new Error('LLM API error: 401 provider detail'));
+    createLLMClient.mockReturnValue({ chat: primaryChat });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG, process.env, 'primary')).rejects.toMatchObject(
+      {
+        attempts: [{ source: 'primary', category: 'unauthorized', status: 401 }],
+      }
+    );
+    expect(createLLMClient).toHaveBeenCalledOnce();
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'primary-test-key' })
+    );
+  });
+
+  it('validates the fallback key only without attempting the primary key', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient.mockReturnValue({
+      chat: vi.fn().mockResolvedValue({ content: 'fallback-only response', toolCalls: [] }),
+    });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG, process.env, 'fallback')).resolves.toEqual({
+      content: 'fallback-only response',
+      usedFallback: true,
+      credentialSource: 'fallback',
+    });
+    expect(createLLMClient).toHaveBeenCalledOnce();
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'fallback-test-key' })
+    );
+  });
+
+  it('reports a missing selected credential without attempting another key', async () => {
+    delete process.env.TRACEMIND_LLM_API_KEY;
+    delete process.env.NVIDIA_API_KEY;
+    delete process.env.TRACEMIND_LLM_FALLBACK_API_KEY;
+    const noConfigKey = {
+      ...DEFAULT_CONFIG,
+      llm: { ...DEFAULT_CONFIG.llm, apiKey: '' },
+    };
+
+    await expect(validateLLMProvider(noConfigKey, process.env, 'primary')).rejects.toMatchObject({
+      attempts: [{ source: 'primary', category: 'missing_key' }],
+      message: 'Provider validation failed. Primary: missing key.',
+    });
+    expect(createLLMClient).not.toHaveBeenCalled();
   });
 });
