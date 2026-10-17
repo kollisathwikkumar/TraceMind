@@ -4,7 +4,11 @@ const { createLLMClient } = vi.hoisted(() => ({ createLLMClient: vi.fn() }));
 vi.mock('../model/llm', () => ({ createLLMClient }));
 
 import { DEFAULT_CONFIG } from '../utils/config';
-import { validateLLMProvider } from './llm-validation';
+import {
+  classifyLLMProviderFailure,
+  LLMValidationError,
+  validateLLMProvider,
+} from './llm-validation';
 
 describe('LLM validation fallback', () => {
   afterEach(() => {
@@ -47,8 +51,66 @@ describe('LLM validation fallback', () => {
       chat: vi.fn().mockRejectedValue(new Error('provider unavailable')),
     });
 
-    await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toThrow('provider unavailable');
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
+      name: 'LLMValidationError',
+      attempts: [{ source: 'primary', category: 'unknown' }],
+    });
     expect(createLLMClient).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [401, 'unauthorized'],
+    [403, 'forbidden'],
+    [404, 'not_found'],
+    [429, 'rate_limited'],
+    [503, 'upstream_http'],
+  ] as const)('classifies HTTP %s without exposing provider error details', (status, category) => {
+    const failure = classifyLLMProviderFailure(
+      new Error(`LLM API error (provider/model): ${status} private response body`),
+      'primary'
+    );
+
+    expect(failure).toEqual({ source: 'primary', category, status });
+  });
+
+  it.each([
+    ['request timed out', 'timeout'],
+    ['Request was aborted', 'timeout'],
+    ['fetch failed: private host detail', 'network'],
+    ['ECONNRESET private socket detail', 'network'],
+  ] as const)('classifies %s as %s without returning raw text', (message, category) => {
+    expect(classifyLLMProviderFailure(new Error(message), 'primary')).toEqual({
+      source: 'primary',
+      category,
+    });
+  });
+
+  it('reports safe diagnostics for both a failed primary and failed fallback', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient
+      .mockReturnValueOnce({
+        chat: vi
+          .fn()
+          .mockRejectedValue(new Error('LLM API error (provider/model): 401 secret-primary')),
+      })
+      .mockReturnValueOnce({
+        chat: vi
+          .fn()
+          .mockRejectedValue(new Error('LLM API error (provider/model): 429 secret-fallback')),
+      });
+
+    const failure = validateLLMProvider(DEFAULT_CONFIG);
+    await expect(failure).rejects.toBeInstanceOf(LLMValidationError);
+    await expect(failure).rejects.toMatchObject({
+      attempts: [
+        { source: 'primary', category: 'unauthorized', status: 401 },
+        { source: 'fallback', category: 'rate_limited', status: 429 },
+      ],
+      message:
+        'Provider validation failed. Primary: unauthorized (HTTP 401); Fallback: rate limited (HTTP 429).',
+    });
+    await expect(failure).rejects.not.toThrow(/secret-primary|secret-fallback/);
   });
 
   it('reports a primary success without attempting the fallback', async () => {

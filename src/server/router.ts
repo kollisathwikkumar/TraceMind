@@ -10,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { IKnowledgeRetriever } from '../knowledge/retriever/types';
 import type { KnowledgeDocument, KnowledgeType } from '../knowledge/types';
 import type { Config } from '../utils/config';
-import { validateLLMProvider } from './llm-validation';
+import { LLMValidationError, validateLLMProvider } from './llm-validation';
 import type { MCPServer } from '../mcp/server';
 import type { FalkorDBStore } from '../knowledge/store/falkordb-store';
 import type { IncidentRepository, IncidentSeverity, IncidentStatus } from './incidents/store';
@@ -411,14 +411,16 @@ export function createRouter(routerConfig: RouterConfig) {
             checkedAt: new Date().toISOString(),
           },
         });
-      } catch {
+      } catch (error) {
         // Do not echo provider exceptions: SDK errors may contain request
         // metadata, including credential-bearing headers or URLs.
         sendJson(res, 502, {
           error: {
             code: 'llm_validation_failed',
             message:
-              'Provider test request failed. Check the configured key, model, endpoint, and provider availability.',
+              error instanceof LLMValidationError
+                ? error.message
+                : 'Provider test request failed. Check the configured key, model, endpoint, and provider availability.',
           },
         });
       }
