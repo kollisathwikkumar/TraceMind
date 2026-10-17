@@ -16,6 +16,7 @@ export interface LLMValidationResponse {
 
 export type LLMProviderFailureCategory =
   | 'missing_key'
+  | 'reasoning_only'
   | 'unexpected_response'
   | 'unauthorized'
   | 'forbidden'
@@ -42,7 +43,7 @@ export class LLMValidationError extends Error {
 }
 
 class EmptyLLMResponseError extends Error {
-  constructor() {
+  constructor(readonly hadReasoning: boolean) {
     super('Provider returned an empty response');
     this.name = 'EmptyLLMResponseError';
   }
@@ -87,7 +88,9 @@ export function classifyLLMProviderFailure(
   error: unknown,
   source: LLMProviderAttemptFailure['source']
 ): LLMProviderAttemptFailure {
-  if (error instanceof EmptyLLMResponseError) return { source, category: 'empty_response' };
+  if (error instanceof EmptyLLMResponseError) {
+    return { source, category: error.hadReasoning ? 'reasoning_only' : 'empty_response' };
+  }
   if (error instanceof UnexpectedLLMResponseError)
     return { source, category: 'unexpected_response' };
   const status = statusFromError(error);
@@ -162,7 +165,7 @@ export async function validateLLMProvider(
       VALIDATION_USER_PROMPT
     );
     const content = result.content.trim();
-    if (!content) throw new EmptyLLMResponseError();
+    if (!content) throw new EmptyLLMResponseError(Boolean(result.thinking?.trim()));
     // The probe deliberately asks for a fixed sentinel. A reasoning-only
     // stream or unrelated provider text must not be reported as connected.
     if (content !== VALIDATION_EXPECTED_RESPONSE) {

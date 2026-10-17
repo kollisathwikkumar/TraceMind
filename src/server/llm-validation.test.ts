@@ -73,6 +73,30 @@ describe('LLM validation fallback', () => {
     expect(createLLMClient).toHaveBeenCalledTimes(2);
   });
 
+  it('distinguishes a reasoning-only stream from a genuinely empty provider result', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient
+      .mockReturnValueOnce({
+        chat: vi.fn().mockResolvedValue({
+          content: '',
+          thinking: 'internal reasoning is deliberately not returned',
+          toolCalls: [],
+        }),
+      })
+      .mockReturnValueOnce({
+        chat: vi.fn().mockResolvedValue({
+          content: 'TraceMind model connection successful.',
+          toolCalls: [],
+        }),
+      });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toMatchObject({
+      usedFallback: true,
+      primaryFailure: { source: 'primary', category: 'reasoning_only' },
+    });
+  });
+
   it('does not treat an unrelated response as a successful validation', async () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
