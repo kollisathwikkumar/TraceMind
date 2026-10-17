@@ -124,7 +124,15 @@ export async function validateLLMProvider(
     maxTokens: config.llm.provider === 'openai-compatible' ? 16_384 : 256,
     requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
     ...(config.llm.provider === 'openai-compatible'
-      ? { extraBody: { chat_template_kwargs: { enable_thinking: true } } }
+      ? {
+          // Bound reasoning so the model has a reserved part of the output
+          // budget for its visible answer. NVIDIA's hosted Nemotron endpoint
+          // accepts this as a top-level chat-completions parameter.
+          extraBody: {
+            chat_template_kwargs: { enable_thinking: true },
+            reasoning_budget: 8_192,
+          },
+        }
       : {}),
   };
 
