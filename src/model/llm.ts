@@ -85,6 +85,7 @@ class PiAIClient implements LLMClient {
       if (!config.apiBaseUrl) {
         throw new Error('OpenAI-compatible provider requires llm.apiBaseUrl');
       }
+      const isNvidiaHosted = config.apiBaseUrl.includes('integrate.api.nvidia.com');
       this.model = {
         id: config.model,
         name: config.model,
@@ -96,7 +97,13 @@ class PiAIClient implements LLMClient {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128_000,
         maxTokens: config.maxTokens || 4096,
-        compat: { supportsStore: false, supportsUsageInStreaming: false },
+        compat: {
+          supportsStore: false,
+          supportsUsageInStreaming: false,
+          // NVIDIA NIM documents `max_tokens`; pi-ai otherwise sends
+          // `max_completion_tokens` for unknown OpenAI-compatible hosts.
+          ...(isNvidiaHosted ? { maxTokensField: 'max_tokens' as const } : {}),
+        },
       };
     } else {
       // Get model from pi-ai's provider registry.

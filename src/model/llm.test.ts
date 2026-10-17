@@ -104,4 +104,22 @@ describe('OpenAI-compatible model configuration', () => {
     options.onPayload?.(payload);
     expect(payload).toMatchObject(extraBody);
   });
+
+  it('uses NVIDIA NIM max_tokens parameter compatibility', async () => {
+    const client = createLLMClient({
+      provider: 'openai-compatible',
+      model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+      apiBaseUrl: 'https://integrate.api.nvidia.com/v1',
+    });
+
+    await client.chat('system', 'user');
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compat: expect.objectContaining({ maxTokensField: 'max_tokens' }),
+      }),
+      expect.any(Object),
+      expect.any(Object)
+    );
+  });
 });
