@@ -4,6 +4,7 @@ import type { Config } from '../utils/config';
 const VALIDATION_SYSTEM_PROMPT =
   'You are validating a model connection. Follow the user instruction exactly.';
 const VALIDATION_USER_PROMPT = 'Reply with exactly: TraceMind model connection successful.';
+const VALIDATION_EXPECTED_RESPONSE = 'TraceMind model connection successful.';
 
 export interface LLMValidationResponse {
   content: string;
@@ -15,6 +16,7 @@ export interface LLMValidationResponse {
 
 export type LLMProviderFailureCategory =
   | 'missing_key'
+  | 'unexpected_response'
   | 'unauthorized'
   | 'forbidden'
   | 'not_found'
@@ -43,6 +45,13 @@ class EmptyLLMResponseError extends Error {
   constructor() {
     super('Provider returned an empty response');
     this.name = 'EmptyLLMResponseError';
+  }
+}
+
+class UnexpectedLLMResponseError extends Error {
+  constructor() {
+    super('Provider returned text that did not match the validation sentinel');
+    this.name = 'UnexpectedLLMResponseError';
   }
 }
 
@@ -79,6 +88,8 @@ export function classifyLLMProviderFailure(
   source: LLMProviderAttemptFailure['source']
 ): LLMProviderAttemptFailure {
   if (error instanceof EmptyLLMResponseError) return { source, category: 'empty_response' };
+  if (error instanceof UnexpectedLLMResponseError)
+    return { source, category: 'unexpected_response' };
   const status = statusFromError(error);
   const text = errorText(error);
   let category: LLMProviderFailureCategory;
@@ -115,6 +126,9 @@ export async function validateLLMProvider(
   environment: NodeJS.ProcessEnv = process.env,
   credentialSource: 'auto' | 'primary' | 'fallback' = 'auto'
 ): Promise<LLMValidationResponse> {
+  const usesNvidiaNim =
+    config.llm.provider === 'openai-compatible' &&
+    config.llm.apiBaseUrl?.includes('integrate.api.nvidia.com');
   const base = {
     ...config.llm,
     // Validation asks for a fixed, tiny answer, so disable long-form
@@ -123,7 +137,14 @@ export async function validateLLMProvider(
     maxTokens: config.llm.provider === 'openai-compatible' ? 512 : 256,
     requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
     ...(config.llm.provider === 'openai-compatible'
-      ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } }
+      ? {
+          extraBody: {
+            chat_template_kwargs: {
+              enable_thinking: false,
+              ...(usesNvidiaNim ? { force_nonempty_content: true } : {}),
+            },
+          },
+        }
       : {}),
   };
 
@@ -142,6 +163,11 @@ export async function validateLLMProvider(
     );
     const content = result.content.trim();
     if (!content) throw new EmptyLLMResponseError();
+    // The probe deliberately asks for a fixed sentinel. A reasoning-only
+    // stream or unrelated provider text must not be reported as connected.
+    if (content !== VALIDATION_EXPECTED_RESPONSE) {
+      throw new UnexpectedLLMResponseError();
+    }
     return content;
   };
 

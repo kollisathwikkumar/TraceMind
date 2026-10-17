@@ -32,11 +32,13 @@ describe('LLM validation fallback', () => {
           .mockRejectedValue(new Error('LLM API error (provider/model): 401 secret-primary')),
       })
       .mockReturnValueOnce({
-        chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
+        chat: vi
+          .fn()
+          .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
       });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
-      content: 'fallback response',
+      content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
       primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
@@ -57,14 +59,40 @@ describe('LLM validation fallback', () => {
     createLLMClient
       .mockReturnValueOnce({ chat: vi.fn().mockResolvedValue({ content: '   ', toolCalls: [] }) })
       .mockReturnValueOnce({
-        chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
+        chat: vi
+          .fn()
+          .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
       });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
-      content: 'fallback response',
+      content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
       primaryFailure: { source: 'primary', category: 'empty_response' },
+    });
+    expect(createLLMClient).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not treat an unrelated response as a successful validation', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    createLLMClient
+      .mockReturnValueOnce({
+        chat: vi
+          .fn()
+          .mockResolvedValue({ content: 'I am thinking about this request.', toolCalls: [] }),
+      })
+      .mockReturnValueOnce({
+        chat: vi.fn().mockResolvedValue({
+          content: 'TraceMind model connection successful.',
+          toolCalls: [],
+        }),
+      });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toMatchObject({
+      content: 'TraceMind model connection successful.',
+      usedFallback: true,
+      primaryFailure: { source: 'primary', category: 'unexpected_response' },
     });
     expect(createLLMClient).toHaveBeenCalledTimes(2);
   });
@@ -160,11 +188,13 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     createLLMClient.mockReturnValue({
-      chat: vi.fn().mockResolvedValue({ content: 'primary response', toolCalls: [] }),
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
     });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toEqual({
-      content: 'primary response',
+      content: 'TraceMind model connection successful.',
       usedFallback: false,
       credentialSource: 'primary',
     });
@@ -175,7 +205,9 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_API_KEY = 'rotated-primary-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     createLLMClient.mockReturnValue({
-      chat: vi.fn().mockResolvedValue({ content: 'primary response', toolCalls: [] }),
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
     });
 
     const configWithStaleKey = {
@@ -183,7 +215,7 @@ describe('LLM validation fallback', () => {
       llm: { ...DEFAULT_CONFIG.llm, apiKey: 'stale-config-key' },
     };
     await expect(validateLLMProvider(configWithStaleKey)).resolves.toMatchObject({
-      content: 'primary response',
+      content: 'TraceMind model connection successful.',
       usedFallback: false,
     });
     expect(createLLMClient).toHaveBeenCalledWith(
@@ -196,11 +228,13 @@ describe('LLM validation fallback', () => {
     createLLMClient
       .mockReturnValueOnce({ chat: vi.fn().mockRejectedValue(new Error('primary unavailable')) })
       .mockReturnValueOnce({
-        chat: vi.fn().mockResolvedValue({ content: 'fallback response', toolCalls: [] }),
+        chat: vi
+          .fn()
+          .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
       });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).resolves.toMatchObject({
-      content: 'fallback response',
+      content: 'TraceMind model connection successful.',
       usedFallback: true,
     });
     expect(createLLMClient).toHaveBeenNthCalledWith(
@@ -236,7 +270,12 @@ describe('LLM validation fallback', () => {
       expect.objectContaining({
         maxTokens: 512,
         requestTimeoutMs: 90_000,
-        extraBody: { chat_template_kwargs: { enable_thinking: false } },
+        extraBody: {
+          chat_template_kwargs: {
+            enable_thinking: false,
+            force_nonempty_content: true,
+          },
+        },
         apiKey: 'primary-test-key',
       })
     );
@@ -263,11 +302,13 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     createLLMClient.mockReturnValue({
-      chat: vi.fn().mockResolvedValue({ content: 'fallback-only response', toolCalls: [] }),
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
     });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG, process.env, 'fallback')).resolves.toEqual({
-      content: 'fallback-only response',
+      content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
     });
