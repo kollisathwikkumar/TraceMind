@@ -236,6 +236,70 @@ export class FalkorDBStore {
     );
   }
 
+  async unlinkDependency(input: {
+    orgId: string;
+    dependentId: string;
+    dependencyId: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (dependent:Service {org_id: $orgId, id: $dependentId})
+       -[r:DEPENDS_ON {org_id: $orgId}]->
+       (dependency:Service {org_id: $orgId, id: $dependencyId})
+       WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       DELETE r`,
+      { params: input }
+    );
+  }
+
+  async unlinkIncidentFromService(input: {
+    orgId: string;
+    incidentId: string;
+    serviceId: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (incident:Incident {org_id: $orgId, id: $incidentId})
+       -[r:AFFECTS {org_id: $orgId}]->
+       (service:Service {org_id: $orgId, id: $serviceId})
+       WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
+       DELETE r`,
+      { params: input }
+    );
+  }
+
+  async deleteService(input: {
+    orgId: string;
+    id: string;
+    aggregateVersion?: number;
+  }): Promise<void> {
+    await this.graph.query(
+      `MATCH (service:Service {org_id: $orgId, id: $id})
+       WHERE ($aggregateVersion IS NULL AND coalesce(service.catalog_version, 0) = 0)
+          OR ($aggregateVersion IS NOT NULL AND coalesce(service.catalog_version, 0) < $aggregateVersion)
+       DETACH DELETE service`,
+      { params: input }
+    );
+  }
+
+  /** Removes a tenant projection without touching nodes or edges from other organizations. */
+  async deleteOrganization(orgId: string): Promise<void> {
+    await this.graph.query(
+      `MATCH (a)-[r:DEPENDS_ON {org_id: $orgId}]->(b)
+       WHERE a.org_id = $orgId AND b.org_id = $orgId
+       DELETE r`,
+      { params: { orgId } }
+    );
+    await this.graph.query(`MATCH (i:Incident {org_id: $orgId}) DETACH DELETE i`, {
+      params: { orgId },
+    });
+    await this.graph.query(`MATCH (s:Service {org_id: $orgId}) DETACH DELETE s`, {
+      params: { orgId },
+    });
+  }
+
   async getServiceNeighborhood(
     orgId: string,
     serviceId: string

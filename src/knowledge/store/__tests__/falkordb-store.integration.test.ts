@@ -159,4 +159,63 @@ describe.skipIf(!url)('FalkorDB v4+ integration (RUNBOOK_TEST_FALKORDB_URL)', ()
     await expect(store.findRelatedIncidents('org-a', 'cross-current')).resolves.toEqual([]);
     await expect(store.findIncidentEvidencePaths('org-a', 'cross-current')).resolves.toEqual([]);
   }, 30_000);
+
+  it('unlinks and deletes only the requested tenant graph records', async () => {
+    await store.upsertService({ orgId: 'lifecycle-a', id: 'svc', name: 'A service' });
+    await store.upsertService({ orgId: 'lifecycle-a', id: 'db', name: 'A database' });
+    await store.upsertService({ orgId: 'lifecycle-b', id: 'svc', name: 'B service' });
+    await store.upsertService({ orgId: 'lifecycle-b', id: 'db', name: 'B database' });
+    await store.linkDependency({
+      orgId: 'lifecycle-a',
+      dependentId: 'svc',
+      dependencyId: 'db',
+      aggregateVersion: 1,
+    });
+    await store.linkDependency({
+      orgId: 'lifecycle-b',
+      dependentId: 'svc',
+      dependencyId: 'db',
+      aggregateVersion: 1,
+    });
+    await store.linkIncidentToService({
+      orgId: 'lifecycle-a',
+      incidentId: 'incident',
+      title: 'A incident',
+      serviceId: 'svc',
+      aggregateVersion: 1,
+    });
+
+    await store.unlinkDependency({
+      orgId: 'lifecycle-a',
+      dependentId: 'svc',
+      dependencyId: 'db',
+      aggregateVersion: 2,
+    });
+    await store.unlinkIncidentFromService({
+      orgId: 'lifecycle-a',
+      incidentId: 'incident',
+      serviceId: 'svc',
+      aggregateVersion: 2,
+    });
+    expect(await store.getServiceNeighborhood('lifecycle-a', 'svc')).toEqual([]);
+    expect(await store.getServiceNeighborhood('lifecycle-b', 'svc')).toHaveLength(1);
+
+    await store.linkDependency({
+      orgId: 'lifecycle-a',
+      dependentId: 'svc',
+      dependencyId: 'db',
+      aggregateVersion: 3,
+    });
+    await store.deleteService({ orgId: 'lifecycle-a', id: 'svc', aggregateVersion: 2 });
+    expect(await store.getServiceNeighborhood('lifecycle-a', 'svc')).toEqual([]);
+    expect(await store.getServiceNeighborhood('lifecycle-b', 'svc')).toHaveLength(1);
+
+    await store.deleteOrganization('lifecycle-a');
+    const remaining = await graph.roQuery<unknown[]>(
+      'MATCH (n {org_id: $orgId}) RETURN count(n) AS count',
+      { params: { orgId: 'lifecycle-a' } }
+    );
+    expect((remaining.data?.[0] as { count?: number | string } | undefined)?.count).toBe(0);
+    expect(await store.getServiceNeighborhood('lifecycle-b', 'svc')).toHaveLength(1);
+  }, 30_000);
 });

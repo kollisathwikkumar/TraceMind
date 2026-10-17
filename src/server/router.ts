@@ -51,7 +51,15 @@ export interface RouterConfig {
   };
   graphCatalogStore?: Pick<
     PostgresGraphCatalogStore,
-    'upsertService' | 'linkDependency' | 'linkIncidentToService' | 'checkHealth'
+    | 'upsertService'
+    | 'linkDependency'
+    | 'linkIncidentToService'
+    | 'linkIncidentToServices'
+    | 'unlinkDependency'
+    | 'unlinkIncidentFromService'
+    | 'deleteService'
+    | 'reconcile'
+    | 'checkHealth'
   >;
   incidentStore?: IncidentRepository;
   workflowStore?: WorkflowRepository;
@@ -161,13 +169,15 @@ export function createRouter(routerConfig: RouterConfig) {
           routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth
             ? withTimeout(
                 Promise.all(
-                  [...new Set([graphOrgId, ...(routerConfig.auth0OrgIds ?? [])])].map(async (orgId) => {
-                    const [catalogPending, legacyPending] = await Promise.all([
-                      routerConfig.graphCatalogStore?.checkHealth(orgId) ?? 0,
-                      routerConfig.graphOutbox?.checkHealth?.(orgId) ?? 0,
-                    ]);
-                    return catalogPending + legacyPending;
-                  })
+                  [...new Set([graphOrgId, ...(routerConfig.auth0OrgIds ?? [])])].map(
+                    async (orgId) => {
+                      const [catalogPending, legacyPending] = await Promise.all([
+                        routerConfig.graphCatalogStore?.checkHealth(orgId) ?? 0,
+                        routerConfig.graphOutbox?.checkHealth?.(orgId) ?? 0,
+                      ]);
+                      return catalogPending + legacyPending;
+                    }
+                  )
                 ),
                 timeoutMs
               )
@@ -189,11 +199,12 @@ export function createRouter(routerConfig: RouterConfig) {
             ? 'healthy'
             : 'unhealthy'
           : 'optional_not_configured',
-        graphProjection: routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth
-          ? graphProjectionPending === undefined
-            ? 'unhealthy'
-            : 'healthy'
-          : 'optional_not_configured',
+        graphProjection:
+          routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth
+            ? graphProjectionPending === undefined
+              ? 'unhealthy'
+              : 'healthy'
+            : 'optional_not_configured',
         knowledgeStore: knowledgeHealth
           ? knowledgeStoreHealthy
             ? 'healthy'
@@ -226,7 +237,8 @@ export function createRouter(routerConfig: RouterConfig) {
         ((knowledgeHealth === undefined && !postgresKnowledgeRequired) || knowledgeStoreHealthy) &&
         ((knowledgeHealth?.vectorStore === undefined && !postgresKnowledgeRequired) ||
           vectorStoreHealthy) &&
-        (!(routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth) || graphProjectionPending !== undefined) &&
+        (!(routerConfig.graphCatalogStore || routerConfig.graphOutbox?.checkHealth) ||
+          graphProjectionPending !== undefined) &&
         (!routerConfig.remediationExecutorRequired || Boolean(routerConfig.remediationExecutor));
       const payload = {
         data: {
@@ -497,7 +509,17 @@ export function createRouter(routerConfig: RouterConfig) {
         return;
       }
       try {
-        await handleIncidentRequest(req, res, path, method, incidentStore, actor, tenantId);
+        await handleIncidentRequest(
+          req,
+          res,
+          path,
+          method,
+          incidentStore,
+          actor,
+          tenantId,
+          graphStore,
+          routerConfig.graphCatalogStore
+        );
       } catch (error) {
         const invalidTransition =
           error instanceof Error && error.message.startsWith('Invalid incident status transition:');
@@ -695,6 +717,7 @@ function requestActor(identity: RequestIdentity | undefined): string {
 
 function requiredScopeFor(path: string, method: string): string | undefined {
   if (path === '/mcp') return 'mcp:access';
+  if (path === '/api/v1/graph/reconcile' && method === 'POST') return 'graph:admin';
   if (path === '/api/v1/llm/validate') return 'llm:validate';
   if (path === '/api/v1/settings/provider-key') return 'settings:keys';
   if (path.startsWith('/api/v1/graph/')) return method === 'GET' ? 'graph:read' : 'graph:write';
@@ -802,7 +825,12 @@ async function handleIncidentRequest(
   method: string,
   store: IncidentRepository,
   actor: string,
-  tenantId: string
+  tenantId: string,
+  graphStore?: FalkorDBStore,
+  graphCatalogStore?: Pick<
+    PostgresGraphCatalogStore,
+    'linkIncidentToService' | 'linkIncidentToServices'
+  >
 ): Promise<void> {
   if (path === '/api/v1/incidents' && method === 'GET') {
     sendJson(res, 200, { data: await store.list(tenantId) });
@@ -813,33 +841,102 @@ async function handleIncidentRequest(
     if (!body) return;
     const title = asNonEmptyString(body.title);
     const severity = body.severity;
+    const serviceIds = body.serviceIds === undefined ? [] : body.serviceIds;
     if (
       !title ||
       !isSeverity(severity) ||
       (body.description !== undefined && typeof body.description !== 'string') ||
-      (body.assignee !== undefined && body.assignee !== null && typeof body.assignee !== 'string')
+      (body.assignee !== undefined &&
+        body.assignee !== null &&
+        typeof body.assignee !== 'string') ||
+      !Array.isArray(serviceIds) ||
+      serviceIds.length > 50 ||
+      serviceIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 200)
     ) {
       sendJson(res, 400, {
         error: {
           code: 'bad_request',
           message:
-            'title and valid severity are required; description and assignee must be strings',
+            'title and valid severity are required; description and assignee must be strings; serviceIds must contain up to 50 non-empty strings',
         },
       });
       return;
     }
-    sendJson(res, 201, {
-      data: await store.create(
-        {
-          title,
-          severity,
-          description: body.description as string | undefined,
-          assignee: body.assignee as string | null | undefined,
+    const uniqueServiceIds = [...new Set((serviceIds as string[]).map((id) => id.trim()))];
+    if (uniqueServiceIds.length && !graphStore && !graphCatalogStore) {
+      sendJson(res, 503, {
+        error: {
+          code: 'graph_unavailable',
+          message: 'Cannot link affected services without graph storage',
         },
-        actor,
-        tenantId
-      ),
-    });
+      });
+      return;
+    }
+    const incident = await store.create(
+      {
+        title,
+        severity,
+        description: body.description as string | undefined,
+        assignee: body.assignee as string | null | undefined,
+      },
+      actor,
+      tenantId
+    );
+    if (uniqueServiceIds.length) {
+      const linkedServiceIds: string[] = [];
+      const link = (serviceId: string) => ({
+        orgId: tenantId,
+        incidentId: incident.id,
+        title: incident.title,
+        serviceId,
+      });
+      try {
+        if (graphCatalogStore) {
+          // A single PostgreSQL transaction records every link and outbox event,
+          // so partial association sets cannot be committed by this route.
+          await graphCatalogStore.linkIncidentToServices({
+            orgId: tenantId,
+            incidentId: incident.id,
+            title: incident.title,
+            serviceIds: uniqueServiceIds,
+          });
+          linkedServiceIds.push(...uniqueServiceIds);
+        } else {
+          for (const serviceId of uniqueServiceIds) {
+            await graphStore!.linkIncidentToService(link(serviceId));
+            linkedServiceIds.push(serviceId);
+          }
+        }
+      } catch {
+        // Incident creation is already committed in its repository. Return its
+        // identity and explicit graph-link state so clients can retry links
+        // without creating a duplicate incident.
+        sendJson(res, 201, {
+          data: incident,
+          meta: {
+            graphProjection: {
+              status: linkedServiceIds.length ? 'partial' : 'failed',
+              requestedServiceIds: uniqueServiceIds,
+              linkedServiceIds,
+            },
+          },
+        });
+        return;
+      }
+      sendJson(res, 201, {
+        data: incident,
+        meta: {
+          provenance: 'Incident service links are tenant-scoped in FalkorDB.',
+          graphProjection: {
+            status: graphCatalogStore ? 'queued' : 'applied',
+            requestedServiceIds: uniqueServiceIds,
+            linkedServiceIds,
+          },
+        },
+      });
+      return;
+    }
+    sendJson(res, 201, { data: incident });
     return;
   }
   const match = path.match(/^\/api\/v1\/incidents\/([^/]+)(?:\/(events))?$/);
@@ -940,10 +1037,98 @@ async function handleGraphRequest(
   graphOutbox?: { enqueue(event: GraphProjectionEvent): Promise<string> },
   graphCatalogStore?: Pick<
     PostgresGraphCatalogStore,
-    'upsertService' | 'linkDependency' | 'linkIncidentToService' | 'checkHealth'
+    | 'upsertService'
+    | 'linkDependency'
+    | 'linkIncidentToService'
+    | 'linkIncidentToServices'
+    | 'unlinkDependency'
+    | 'unlinkIncidentFromService'
+    | 'deleteService'
+    | 'reconcile'
+    | 'checkHealth'
   >,
   incidentStore?: IncidentRepository
 ): Promise<boolean> {
+  if (path === '/api/v1/graph/reconcile' && method === 'POST') {
+    if (!graphCatalogStore) {
+      sendJson(res, 503, {
+        error: { code: 'graph_catalog_unavailable', message: 'Graph catalog is not configured' },
+      });
+      return true;
+    }
+    const rebuilt = await graphCatalogStore.reconcile(graphStore, orgId);
+    sendJson(res, 200, { data: { organization: orgId, ...rebuilt } });
+    return true;
+  }
+
+  const serviceDeleteMatch = path.match(/^\/api\/v1\/graph\/services\/([^/]+)$/);
+  if (serviceDeleteMatch && method === 'DELETE') {
+    const serviceId = decodeURIComponent(serviceDeleteMatch[1]);
+    if (graphCatalogStore) {
+      const deleted = await graphCatalogStore.deleteService(orgId, serviceId);
+      sendJson(
+        res,
+        deleted ? 202 : 404,
+        deleted
+          ? { data: { id: serviceId, projection: 'queued' } }
+          : { error: { code: 'not_found', message: 'Service not found' } }
+      );
+    } else {
+      await graphStore.deleteService({ orgId, id: serviceId });
+      sendJson(res, 200, { data: { id: serviceId, projection: 'applied' } });
+    }
+    return true;
+  }
+
+  const dependencyDeleteMatch = path.match(/^\/api\/v1\/graph\/dependencies\/([^/]+)\/([^/]+)$/);
+  if (dependencyDeleteMatch && method === 'DELETE') {
+    const dependentId = decodeURIComponent(dependencyDeleteMatch[1]);
+    const dependencyId = decodeURIComponent(dependencyDeleteMatch[2]);
+    const input = { orgId, dependentId, dependencyId };
+    if (graphCatalogStore) {
+      const deleted = await graphCatalogStore.unlinkDependency(input);
+      sendJson(
+        res,
+        deleted ? 202 : 404,
+        deleted
+          ? { data: { dependentId, dependencyId, projection: 'queued' } }
+          : { error: { code: 'not_found', message: 'Dependency not found' } }
+      );
+    } else {
+      await graphStore.unlinkDependency(input);
+      sendJson(res, 200, { data: { dependentId, dependencyId, projection: 'applied' } });
+    }
+    return true;
+  }
+
+  const incidentServiceDeleteMatch = path.match(
+    /^\/api\/v1\/graph\/incidents\/([^/]+)\/services\/([^/]+)$/
+  );
+  if (incidentServiceDeleteMatch && method === 'DELETE') {
+    const incidentId = decodeURIComponent(incidentServiceDeleteMatch[1]);
+    const serviceId = decodeURIComponent(incidentServiceDeleteMatch[2]);
+    const incident = incidentStore ? await incidentStore.get(incidentId, orgId) : undefined;
+    if (incidentStore && !incident) {
+      sendJson(res, 404, { error: { code: 'incident_not_found', message: 'Incident not found' } });
+      return true;
+    }
+    const input = { orgId, incidentId, title: incident?.title || incidentId, serviceId };
+    if (graphCatalogStore) {
+      const deleted = await graphCatalogStore.unlinkIncidentFromService(input);
+      sendJson(
+        res,
+        deleted ? 202 : 404,
+        deleted
+          ? { data: { incidentId, serviceId, projection: 'queued' } }
+          : { error: { code: 'not_found', message: 'Incident-service link not found' } }
+      );
+    } else {
+      await graphStore.unlinkIncidentFromService(input);
+      sendJson(res, 200, { data: { incidentId, serviceId, projection: 'applied' } });
+    }
+    return true;
+  }
+
   const evidencePathMatch = path.match(/^\/api\/v1\/graph\/incidents\/([^/]+)\/evidence-paths$/);
   if (evidencePathMatch && method === 'GET') {
     const rawDepth = url.searchParams.get('depth');
@@ -1217,7 +1402,9 @@ async function handleWorkflowRequest(
     const body = await readJsonBody(req, res);
     if (!body) return;
     if (
-      (body.operation !== 'execute' && body.operation !== 'verify' && body.operation !== 'rollback') ||
+      (body.operation !== 'execute' &&
+        body.operation !== 'verify' &&
+        body.operation !== 'rollback') ||
       typeof body.succeeded !== 'boolean' ||
       !asNonEmptyString(body.evidence)
     ) {
@@ -1236,7 +1423,12 @@ async function handleWorkflowRequest(
       tenantId
     );
     if (!updated) {
-      sendJson(res, 409, { error: { code: 'workflow_conflict', message: 'No matching unknown outcome is available to reconcile' } });
+      sendJson(res, 409, {
+        error: {
+          code: 'workflow_conflict',
+          message: 'No matching unknown outcome is available to reconcile',
+        },
+      });
       return;
     }
     const reconciledPlan = await store.getPlan(planId, tenantId);

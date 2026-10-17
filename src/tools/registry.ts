@@ -73,6 +73,7 @@ import { loadConfig } from '../utils/config';
 import { createKubernetesClient } from '../providers/kubernetes/client';
 import { findGitHubFixCandidates } from './code/github';
 import { findGitLabFixCandidates } from './code/gitlab';
+import { createFalkorImpactTool } from './observability/falkordb-impact';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -2283,6 +2284,7 @@ toolRegistry.registerCategory('observability', 'Observability & Monitoring', [
   datadogTool,
   prometheusTool,
 ]);
+toolRegistry.register('observability', createFalkorImpactTool());
 
 toolRegistry.registerCategory('knowledge', 'Knowledge Base', [searchKnowledgeTool]);
 

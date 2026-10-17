@@ -147,6 +147,211 @@ describe.skipIf(!connectionString)(
         await admin.end();
       }
     });
+
+    it('continues aggregate versions across legacy delimiter IDs and tuple-v1 IDs', async () => {
+      const schema = `graph_catalog_legacy_versions_${randomUUID().replaceAll('-', '')}`;
+      const admin = new Pool({ connectionString });
+      await admin.query(`CREATE SCHEMA "${schema}"`);
+      const pool = new Pool({ connectionString, options: `-c search_path=${schema}` });
+      try {
+        await migrateGraphCatalog(pool);
+        const catalog = new PostgresGraphCatalogStore(pool);
+        await pool.query(
+          `INSERT INTO graph_catalog_outbox(org_id,aggregate_type,aggregate_id,aggregate_version,event_type,payload)
+           VALUES($1,'dependency',$2,41,'dependency.link',$3::jsonb)`,
+          [
+            'org-a',
+            'api->db',
+            JSON.stringify({ dependentId: 'api', dependencyId: 'db', criticality: 'critical' }),
+          ]
+        );
+
+        await catalog.linkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'db' });
+        await catalog.unlinkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'db' });
+        await catalog.linkDependency({
+          orgId: 'org-a',
+          dependentId: 'api',
+          dependencyId: 'db',
+          criticality: 'optional',
+        });
+
+        const rows = await pool.query<{
+          aggregate_id: string;
+          aggregate_version: string | number;
+          event_type: string;
+        }>(
+          `SELECT aggregate_id,aggregate_version,event_type FROM graph_catalog_outbox
+           WHERE org_id='org-a' AND aggregate_type='dependency' ORDER BY id`
+        );
+        expect(rows.rows.map((row) => Number(row.aggregate_version))).toEqual([41, 42, 43, 44]);
+        expect(rows.rows[0].aggregate_id).toBe('api->db');
+        expect(rows.rows.slice(1).every((row) => row.aggregate_id.startsWith('tuple-v1:'))).toBe(
+          true
+        );
+
+        const projected: number[] = [];
+        const result = await catalog.replay(
+          {
+            async upsertService() {},
+            async linkDependency(input) {
+              projected.push(input.aggregateVersion || 0);
+            },
+            async linkIncidentToService() {},
+            async unlinkDependency(input) {
+              projected.push(input.aggregateVersion || 0);
+            },
+          },
+          'org-a'
+        );
+        expect(result).toEqual({ processed: 4, failed: 0 });
+        expect(projected).toEqual([41, 42, 43, 44]);
+      } finally {
+        await pool.end();
+        await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+        await admin.end();
+      }
+    });
+
+    it('unlinks and deletes catalog records transactionally, then rebuilds only the selected tenant', async () => {
+      const schema = `graph_catalog_lifecycle_${randomUUID().replaceAll('-', '')}`;
+      const admin = new Pool({ connectionString });
+      await admin.query(`CREATE SCHEMA "${schema}"`);
+      const pool = new Pool({ connectionString, options: `-c search_path=${schema}` });
+      try {
+        await migrateGraphCatalog(pool);
+        const catalog = new PostgresGraphCatalogStore(pool);
+        await catalog.upsertService({ orgId: 'org-a', id: 'api', name: 'API' });
+        await catalog.upsertService({ orgId: 'org-a', id: 'db', name: 'Database' });
+        await catalog.upsertService({ orgId: 'org-a', id: 'queue', name: 'Queue' });
+        await catalog.upsertService({ orgId: 'org-a', id: 'worker', name: 'Worker' });
+        await catalog.upsertService({ orgId: 'org-b', id: 'api', name: 'Other API' });
+        await catalog.linkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'db' });
+        await catalog.linkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'queue' });
+        await catalog.linkDependency({
+          orgId: 'org-a',
+          dependentId: 'worker',
+          dependencyId: 'queue',
+        });
+        await catalog.linkIncidentToServices({
+          orgId: 'org-a',
+          incidentId: 'inc-a',
+          title: 'API failure',
+          serviceIds: ['api', 'queue', 'api'],
+        });
+        await catalog.linkIncidentToService({
+          orgId: 'org-a',
+          incidentId: 'inc-b',
+          title: 'Database issue',
+          serviceId: 'db',
+        });
+
+        expect(
+          await catalog.unlinkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'db' })
+        ).toBe(true);
+        expect(
+          await catalog.unlinkDependency({ orgId: 'org-a', dependentId: 'api', dependencyId: 'db' })
+        ).toBe(false);
+        expect(
+          await catalog.unlinkIncidentFromService({
+            orgId: 'org-a',
+            incidentId: 'inc-a',
+            title: 'API failure',
+            serviceId: 'queue',
+          })
+        ).toBe(true);
+        expect(await catalog.deleteService('org-a', 'api')).toBe(true);
+        expect(await catalog.deleteService('org-a', 'api')).toBe(false);
+        // Deletion followed by recreation must produce a higher projection version.
+        await catalog.upsertService({ orgId: 'org-a', id: 'api', name: 'API restored' });
+
+        const operations: string[] = [];
+        const projector: GraphCatalogProjectionPort = {
+          async upsertService(x) {
+            operations.push(`upsert:${x.orgId}:${x.id}:${x.name}`);
+          },
+          async linkDependency(x) {
+            operations.push(`link:${x.dependentId}:${x.dependencyId}`);
+          },
+          async linkIncidentToService(x) {
+            operations.push(`affects:${x.incidentId}:${x.serviceId}`);
+          },
+          async unlinkDependency(x) {
+            operations.push(`unlink:${x.dependentId}:${x.dependencyId}`);
+          },
+          async unlinkIncidentFromService(x) {
+            operations.push(`unaffects:${x.incidentId}:${x.serviceId}`);
+          },
+          async deleteService(x) {
+            operations.push(`delete:${x.orgId}:${x.id}`);
+          },
+          async deleteOrganization(orgId) {
+            operations.push(`reset:${orgId}`);
+          },
+        };
+        const replay = await catalog.replay(projector, 'org-a', 100);
+        expect(replay).toEqual({ processed: 16, failed: 0 });
+        expect(operations).toEqual(
+          expect.arrayContaining([
+            'unlink:api:db',
+            'unlink:api:queue',
+            'unaffects:inc-a:api',
+            'unaffects:inc-a:queue',
+            'delete:org-a:api',
+            'upsert:org-a:api:API restored',
+          ])
+        );
+        expect(
+          (
+            await pool.query(
+              "SELECT count(*)::int AS count FROM graph_catalog_services WHERE org_id='org-b'"
+            )
+          ).rows[0].count
+        ).toBe(1);
+
+        const rebuild: string[] = [];
+        const rebuildProjector: GraphCatalogProjectionPort = {
+          ...projector,
+          async upsertService(x) {
+            rebuild.push(`service:${x.orgId}:${x.id}:${x.name}:v${x.aggregateVersion}`);
+          },
+          async linkDependency(x) {
+            rebuild.push(
+              `dependency:${x.orgId}:${x.dependentId}:${x.dependencyId}:v${x.aggregateVersion}`
+            );
+          },
+          async linkIncidentToService(x) {
+            rebuild.push(
+              `incident:${x.orgId}:${x.incidentId}:${x.serviceId}:v${x.aggregateVersion}`
+            );
+          },
+          async deleteOrganization(orgId) {
+            rebuild.push(`reset:${orgId}`);
+          },
+        };
+        await expect(catalog.reconcile(rebuildProjector, 'org-a', 1)).rejects.toThrow(
+          'Graph reconciliation exceeds the 1 record limit'
+        );
+        expect(rebuild).toEqual([]);
+        const result = await catalog.reconcile(rebuildProjector, 'org-a');
+        expect(result).toEqual({ services: 4, dependencies: 1, incidentLinks: 1 });
+        expect(rebuild).toEqual(
+          expect.arrayContaining([
+            'reset:org-a',
+            'service:org-a:api:API restored:v3',
+            'service:org-a:db:Database:v1',
+            'service:org-a:queue:Queue:v1',
+            'service:org-a:worker:Worker:v1',
+            'dependency:org-a:worker:queue:v1',
+            'incident:org-a:inc-b:db:v1',
+          ])
+        );
+        expect(rebuild.some((entry) => entry.includes('org-b'))).toBe(false);
+      } finally {
+        await pool.end();
+        await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+        await admin.end();
+      }
+    });
     it('fences a late projection worker after its lease expires and another worker completes', async () => {
       const schema = `graph_catalog_fence_${randomUUID().replaceAll('-', '')}`;
       const admin = new Pool({ connectionString });

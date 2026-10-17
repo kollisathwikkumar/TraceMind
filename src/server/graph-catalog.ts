@@ -52,12 +52,47 @@ export type GraphCatalogEvent =
       data: Omit<IncidentServiceLinkInput, 'orgId'>;
       aggregateId: string;
       aggregateVersion: number;
+    }
+  | {
+      type: 'service.delete';
+      orgId: string;
+      data: { id: string };
+      aggregateId: string;
+      aggregateVersion: number;
+    }
+  | {
+      type: 'dependency.unlink';
+      orgId: string;
+      data: { dependentId: string; dependencyId: string };
+      aggregateId: string;
+      aggregateVersion: number;
+    }
+  | {
+      type: 'incident.service.unlink';
+      orgId: string;
+      data: { incidentId: string; serviceId: string };
+      aggregateId: string;
+      aggregateVersion: number;
     };
 
 export interface GraphCatalogProjectionPort {
   upsertService(input: GraphServiceInput): Promise<void>;
   linkDependency(input: GraphDependencyInput): Promise<void>;
   linkIncidentToService(input: IncidentServiceLinkInput): Promise<void>;
+  deleteService?(input: { orgId: string; id: string; aggregateVersion?: number }): Promise<void>;
+  unlinkDependency?(input: {
+    orgId: string;
+    dependentId: string;
+    dependencyId: string;
+    aggregateVersion?: number;
+  }): Promise<void>;
+  unlinkIncidentFromService?(input: {
+    orgId: string;
+    incidentId: string;
+    serviceId: string;
+    aggregateVersion?: number;
+  }): Promise<void>;
+  deleteOrganization?(orgId: string): Promise<void>;
 }
 
 /**
@@ -136,6 +171,15 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
       CREATE INDEX IF NOT EXISTS graph_catalog_outbox_aggregate_order
         ON graph_catalog_outbox(org_id, aggregate_type, aggregate_id, aggregate_version)
         WHERE processed_at IS NULL;
+      CREATE INDEX IF NOT EXISTS graph_catalog_outbox_service_identity
+        ON graph_catalog_outbox(org_id, (payload->>'id'), aggregate_version DESC)
+        WHERE aggregate_type='service';
+      CREATE INDEX IF NOT EXISTS graph_catalog_outbox_dependency_identity
+        ON graph_catalog_outbox(org_id, (payload->>'dependentId'), (payload->>'dependencyId'), aggregate_version DESC)
+        WHERE aggregate_type='dependency';
+      CREATE INDEX IF NOT EXISTS graph_catalog_outbox_incident_service_identity
+        ON graph_catalog_outbox(org_id, (payload->>'incidentId'), (payload->>'serviceId'), aggregate_version DESC)
+        WHERE aggregate_type='incident-service';
     `);
     await client.query(
       'ALTER TABLE graph_catalog_outbox ADD COLUMN IF NOT EXISTS lease_token TEXT'
@@ -179,14 +223,15 @@ export class PostgresGraphCatalogStore {
     validateScopeAndId(input.orgId, input.id);
     if (!input.name.trim()) throw new Error('Service name is required');
     await inTransaction(this.pool, input.orgId, async (client) => {
-      const result = await client.query<{ version: string | number }>(
+      await lockCatalogWrite(client, input.orgId);
+      await client.query(
         `INSERT INTO graph_catalog_services(org_id,id,name,service_type,owner)
          VALUES($1,$2,$3,$4,$5)
          ON CONFLICT(org_id,id) DO UPDATE SET
            name=EXCLUDED.name, service_type=EXCLUDED.service_type,
            owner=EXCLUDED.owner, version=graph_catalog_services.version+1,
            updated_at=NOW()
-         RETURNING version`,
+         `,
         [
           input.orgId,
           input.id,
@@ -199,7 +244,7 @@ export class PostgresGraphCatalogStore {
         orgId: input.orgId,
         aggregateType: 'service',
         aggregateId: input.id,
-        aggregateVersion: Number(result.rows[0].version),
+        aggregateVersion: await nextAggregateVersion(client, input.orgId, 'service', [input.id]),
         eventType: 'service.upsert',
         payload: {
           id: input.id,
@@ -218,22 +263,26 @@ export class PostgresGraphCatalogStore {
       throw new Error('A service cannot depend on itself');
     const criticality = input.criticality || 'degraded';
     await inTransaction(this.pool, input.orgId, async (client) => {
+      await lockCatalogWrite(client, input.orgId);
       await ensureService(client, input.orgId, input.dependentId);
       await ensureService(client, input.orgId, input.dependencyId);
-      const result = await client.query<{ version: string | number }>(
+      await client.query(
         `INSERT INTO graph_catalog_dependencies(org_id,dependent_id,dependency_id,criticality)
          VALUES($1,$2,$3,$4)
          ON CONFLICT(org_id,dependent_id,dependency_id) DO UPDATE SET
            criticality=EXCLUDED.criticality,
            version=graph_catalog_dependencies.version+1, updated_at=NOW()
-         RETURNING version`,
+         `,
         [input.orgId, input.dependentId, input.dependencyId, criticality]
       );
       await appendOutbox(client, {
         orgId: input.orgId,
         aggregateType: 'dependency',
         aggregateId: encodeAggregateTuple(input.dependentId, input.dependencyId),
-        aggregateVersion: Number(result.rows[0].version),
+        aggregateVersion: await nextAggregateVersion(client, input.orgId, 'dependency', [
+          input.dependentId,
+          input.dependencyId,
+        ]),
         eventType: 'dependency.link',
         payload: { dependentId: input.dependentId, dependencyId: input.dependencyId, criticality },
       });
@@ -245,21 +294,25 @@ export class PostgresGraphCatalogStore {
     validateScopeAndId(input.orgId, input.serviceId);
     if (!input.title.trim()) throw new Error('Incident title is required');
     await inTransaction(this.pool, input.orgId, async (client) => {
+      await lockCatalogWrite(client, input.orgId);
       await ensureService(client, input.orgId, input.serviceId);
-      const result = await client.query<{ version: string | number }>(
+      await client.query(
         `INSERT INTO graph_catalog_incident_services(org_id,incident_id,service_id,incident_title)
          VALUES($1,$2,$3,$4)
          ON CONFLICT(org_id,incident_id,service_id) DO UPDATE SET
            incident_title=EXCLUDED.incident_title,
            version=graph_catalog_incident_services.version+1, updated_at=NOW()
-         RETURNING version`,
+         `,
         [input.orgId, input.incidentId, input.serviceId, input.title.trim()]
       );
       await appendOutbox(client, {
         orgId: input.orgId,
         aggregateType: 'incident-service',
         aggregateId: encodeAggregateTuple(input.incidentId, input.serviceId),
-        aggregateVersion: Number(result.rows[0].version),
+        aggregateVersion: await nextAggregateVersion(client, input.orgId, 'incident-service', [
+          input.incidentId,
+          input.serviceId,
+        ]),
         eventType: 'incident.service.link',
         payload: {
           incidentId: input.incidentId,
@@ -267,6 +320,159 @@ export class PostgresGraphCatalogStore {
           serviceId: input.serviceId,
         },
       });
+    });
+  }
+
+  /** Atomically records a set of incident/service links and their outbox events. */
+  async linkIncidentToServices(
+    input: Omit<IncidentServiceLinkInput, 'serviceId'> & { serviceIds: string[] }
+  ): Promise<void> {
+    validateScopeAndId(input.orgId, input.incidentId);
+    if (!input.title.trim()) throw new Error('Incident title is required');
+    const serviceIds = [...new Set(input.serviceIds.map((id) => id.trim()))].sort();
+    if (serviceIds.length < 1 || serviceIds.some((id) => !id))
+      throw new Error('At least one valid service ID is required');
+    await inTransaction(this.pool, input.orgId, async (client) => {
+      await lockCatalogWrite(client, input.orgId);
+      for (const serviceId of serviceIds) {
+        validateScopeAndId(input.orgId, serviceId);
+        await ensureService(client, input.orgId, serviceId);
+        await upsertIncidentService(client, {
+          orgId: input.orgId,
+          incidentId: input.incidentId,
+          title: input.title,
+          serviceId,
+        });
+      }
+    });
+  }
+
+  async unlinkDependency(input: GraphDependencyInput): Promise<boolean> {
+    validateScopeAndId(input.orgId, input.dependentId);
+    validateScopeAndId(input.orgId, input.dependencyId);
+    const aggregateId = encodeAggregateTuple(input.dependentId, input.dependencyId);
+    return inTransaction(this.pool, input.orgId, async (client) => {
+      await lockCatalogWrite(client, input.orgId);
+      const deleted = await client.query(
+        `DELETE FROM graph_catalog_dependencies
+         WHERE org_id=$1 AND dependent_id=$2 AND dependency_id=$3`,
+        [input.orgId, input.dependentId, input.dependencyId]
+      );
+      if (!deleted.rowCount) return false;
+      await appendOutbox(client, {
+        orgId: input.orgId,
+        aggregateType: 'dependency',
+        aggregateId,
+        aggregateVersion: await nextAggregateVersion(client, input.orgId, 'dependency', [
+          input.dependentId,
+          input.dependencyId,
+        ]),
+        eventType: 'dependency.unlink',
+        payload: { dependentId: input.dependentId, dependencyId: input.dependencyId },
+      });
+      return true;
+    });
+  }
+
+  async unlinkIncidentFromService(input: IncidentServiceLinkInput): Promise<boolean> {
+    validateScopeAndId(input.orgId, input.incidentId);
+    validateScopeAndId(input.orgId, input.serviceId);
+    const aggregateId = encodeAggregateTuple(input.incidentId, input.serviceId);
+    return inTransaction(this.pool, input.orgId, async (client) => {
+      await lockCatalogWrite(client, input.orgId);
+      const deleted = await client.query(
+        `DELETE FROM graph_catalog_incident_services
+         WHERE org_id=$1 AND incident_id=$2 AND service_id=$3`,
+        [input.orgId, input.incidentId, input.serviceId]
+      );
+      if (!deleted.rowCount) return false;
+      await appendOutbox(client, {
+        orgId: input.orgId,
+        aggregateType: 'incident-service',
+        aggregateId,
+        aggregateVersion: await nextAggregateVersion(client, input.orgId, 'incident-service', [
+          input.incidentId,
+          input.serviceId,
+        ]),
+        eventType: 'incident.service.unlink',
+        payload: { incidentId: input.incidentId, serviceId: input.serviceId },
+      });
+      return true;
+    });
+  }
+
+  /** Deletes a service and all cataloged edges in one transaction. */
+  async deleteService(orgId: string, id: string): Promise<boolean> {
+    validateScopeAndId(orgId, id);
+    return inTransaction(this.pool, orgId, async (client) => {
+      await lockCatalogWrite(client, orgId);
+      const service = await client.query(
+        'SELECT id FROM graph_catalog_services WHERE org_id=$1 AND id=$2 FOR UPDATE',
+        [orgId, id]
+      );
+      if (!service.rowCount) return false;
+
+      const dependencies = await client.query<{ dependent_id: string; dependency_id: string }>(
+        `SELECT dependent_id,dependency_id FROM graph_catalog_dependencies
+         WHERE org_id=$1 AND (dependent_id=$2 OR dependency_id=$2)
+         ORDER BY dependent_id,dependency_id FOR UPDATE`,
+        [orgId, id]
+      );
+      for (const edge of dependencies.rows) {
+        const aggregateId = encodeAggregateTuple(edge.dependent_id, edge.dependency_id);
+        await client.query(
+          'DELETE FROM graph_catalog_dependencies WHERE org_id=$1 AND dependent_id=$2 AND dependency_id=$3',
+          [orgId, edge.dependent_id, edge.dependency_id]
+        );
+        await appendOutbox(client, {
+          orgId,
+          aggregateType: 'dependency',
+          aggregateId,
+          aggregateVersion: await nextAggregateVersion(client, orgId, 'dependency', [
+            edge.dependent_id,
+            edge.dependency_id,
+          ]),
+          eventType: 'dependency.unlink',
+          payload: { dependentId: edge.dependent_id, dependencyId: edge.dependency_id },
+        });
+      }
+
+      const incidentLinks = await client.query<{ incident_id: string; service_id: string }>(
+        'SELECT incident_id,service_id FROM graph_catalog_incident_services WHERE org_id=$1 AND service_id=$2 ORDER BY incident_id FOR UPDATE',
+        [orgId, id]
+      );
+      for (const link of incidentLinks.rows) {
+        const aggregateId = encodeAggregateTuple(link.incident_id, link.service_id);
+        await client.query(
+          'DELETE FROM graph_catalog_incident_services WHERE org_id=$1 AND incident_id=$2 AND service_id=$3',
+          [orgId, link.incident_id, link.service_id]
+        );
+        await appendOutbox(client, {
+          orgId,
+          aggregateType: 'incident-service',
+          aggregateId,
+          aggregateVersion: await nextAggregateVersion(client, orgId, 'incident-service', [
+            link.incident_id,
+            link.service_id,
+          ]),
+          eventType: 'incident.service.unlink',
+          payload: { incidentId: link.incident_id, serviceId: link.service_id },
+        });
+      }
+
+      await client.query('DELETE FROM graph_catalog_services WHERE org_id=$1 AND id=$2', [
+        orgId,
+        id,
+      ]);
+      await appendOutbox(client, {
+        orgId,
+        aggregateType: 'service',
+        aggregateId: id,
+        aggregateVersion: await nextAggregateVersion(client, orgId, 'service', [id]),
+        eventType: 'service.delete',
+        payload: { id },
+      });
+      return true;
     });
   }
 
@@ -278,41 +484,139 @@ export class PostgresGraphCatalogStore {
   ): Promise<{ processed: number; failed: number }> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500)
       throw new Error('Outbox replay limit must be 1..500');
-    let processed = 0;
-    let failed = 0;
-    for (let i = 0; i < limit; i++) {
-      const event = await this.claim(orgId);
-      if (!event) break;
-      try {
-        await project(graph, event);
-        const completed = await queryForTenant(
-          this.pool,
-          orgId,
-          'UPDATE graph_catalog_outbox SET processed_at=NOW(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE id=$1 AND org_id=$2 AND lease_token=$3 AND processed_at IS NULL',
-          [event.id, orgId, event.lease_token]
-        );
-        if (completed.rowCount) processed++;
-      } catch (error) {
-        const released = await queryForTenant(
-          this.pool,
-          orgId,
-          `UPDATE graph_catalog_outbox
-           SET lease_until=NULL,
-               lease_token=NULL,
-               available_at=NOW()+LEAST(INTERVAL '5 minutes', INTERVAL '2 seconds' * POWER(2, LEAST(attempts,7))),
-               last_error=$2
-          WHERE id=$1 AND org_id=$3 AND lease_token=$4 AND processed_at IS NULL`,
-          [
-            event.id,
-            error instanceof Error ? error.message.slice(0, 1000) : 'Projection failed',
+    return withProjectionLock(this.pool, orgId, false, async () => {
+      let processed = 0;
+      let failed = 0;
+      for (let i = 0; i < limit; i++) {
+        const event = await this.claim(orgId);
+        if (!event) break;
+        try {
+          await project(graph, event);
+          const completed = await queryForTenant(
+            this.pool,
             orgId,
-            event.lease_token,
-          ]
-        );
-        if (released.rowCount) failed++;
+            'UPDATE graph_catalog_outbox SET processed_at=NOW(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE id=$1 AND org_id=$2 AND lease_token=$3 AND processed_at IS NULL',
+            [event.id, orgId, event.lease_token]
+          );
+          if (completed.rowCount) processed++;
+        } catch (error) {
+          const released = await queryForTenant(
+            this.pool,
+            orgId,
+            `UPDATE graph_catalog_outbox
+             SET lease_until=NULL,
+                 lease_token=NULL,
+                 available_at=NOW()+LEAST(INTERVAL '5 minutes', INTERVAL '2 seconds' * POWER(2, LEAST(attempts,7))),
+                 last_error=$2
+            WHERE id=$1 AND org_id=$3 AND lease_token=$4 AND processed_at IS NULL`,
+            [
+              event.id,
+              error instanceof Error ? error.message.slice(0, 1000) : 'Projection failed',
+              orgId,
+              event.lease_token,
+            ]
+          );
+          if (released.rowCount) failed++;
+        }
       }
-    }
-    return { processed, failed };
+      return { processed, failed };
+    });
+  }
+
+  /** Rebuilds only one tenant's projection from the authoritative catalog. */
+  async reconcile(
+    graph: GraphCatalogProjectionPort,
+    orgId = this.defaultOrgId,
+    limit = 1000
+  ): Promise<{ services: number; dependencies: number; incidentLinks: number }> {
+    validateScopeAndId(orgId, 'reconcile');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000)
+      throw new Error('Graph reconciliation limit must be 1..1000');
+    if (!graph.deleteOrganization) throw new Error('Graph projector does not support tenant reset');
+    const deleteOrganization = graph.deleteOrganization.bind(graph);
+    return withProjectionLock(this.pool, orgId, true, async () => {
+      const snapshot = await inTransaction(this.pool, orgId, async (client) => {
+        const services = await client.query<{
+          id: string;
+          name: string;
+          service_type: string;
+          owner: string;
+          catalog_version: number | null;
+        }>(
+          `SELECT s.id,s.name,s.service_type,s.owner,
+             (SELECT max(e.aggregate_version) FROM graph_catalog_outbox e
+              WHERE e.org_id=s.org_id AND e.aggregate_type='service' AND e.payload->>'id'=s.id) AS catalog_version
+           FROM graph_catalog_services s WHERE s.org_id=$1 ORDER BY s.id LIMIT $2`,
+          [orgId, limit + 1]
+        );
+        const dependencies = await client.query<{
+          dependent_id: string;
+          dependency_id: string;
+          criticality: GraphDependencyInput['criticality'];
+          catalog_version: number | null;
+        }>(
+          `SELECT d.dependent_id,d.dependency_id,d.criticality,
+             (SELECT max(e.aggregate_version) FROM graph_catalog_outbox e
+              WHERE e.org_id=d.org_id AND e.aggregate_type='dependency'
+                AND e.payload->>'dependentId'=d.dependent_id AND e.payload->>'dependencyId'=d.dependency_id) AS catalog_version
+           FROM graph_catalog_dependencies d WHERE d.org_id=$1 ORDER BY d.dependent_id,d.dependency_id LIMIT $2`,
+          [orgId, limit + 1]
+        );
+        const incidentLinks = await client.query<{
+          incident_id: string;
+          incident_title: string;
+          service_id: string;
+          catalog_version: number | null;
+        }>(
+          `SELECT l.incident_id,l.incident_title,l.service_id,
+             (SELECT max(e.aggregate_version) FROM graph_catalog_outbox e
+              WHERE e.org_id=l.org_id AND e.aggregate_type='incident-service'
+                AND e.payload->>'incidentId'=l.incident_id AND e.payload->>'serviceId'=l.service_id) AS catalog_version
+           FROM graph_catalog_incident_services l WHERE l.org_id=$1 ORDER BY l.incident_id,l.service_id LIMIT $2`,
+          [orgId, limit + 1]
+        );
+        const total = services.rows.length + dependencies.rows.length + incidentLinks.rows.length;
+        if (total > limit)
+          throw new Error(`Graph reconciliation exceeds the ${limit} record limit`);
+        return {
+          services: services.rows,
+          dependencies: dependencies.rows,
+          incidentLinks: incidentLinks.rows,
+        };
+      });
+
+      await deleteOrganization(orgId);
+      for (const service of snapshot.services)
+        await graph.upsertService({
+          orgId,
+          id: service.id,
+          name: service.name,
+          serviceType: service.service_type,
+          owner: service.owner,
+          aggregateVersion: service.catalog_version ?? undefined,
+        });
+      for (const edge of snapshot.dependencies)
+        await graph.linkDependency({
+          orgId,
+          dependentId: edge.dependent_id,
+          dependencyId: edge.dependency_id,
+          criticality: edge.criticality || 'degraded',
+          aggregateVersion: edge.catalog_version ?? undefined,
+        });
+      for (const link of snapshot.incidentLinks)
+        await graph.linkIncidentToService({
+          orgId,
+          incidentId: link.incident_id,
+          title: link.incident_title,
+          serviceId: link.service_id,
+          aggregateVersion: link.catalog_version ?? undefined,
+        });
+      return {
+        services: snapshot.services.length,
+        dependencies: snapshot.dependencies.length,
+        incidentLinks: snapshot.incidentLinks.length,
+      };
+    });
   }
 
   private async claim(orgId: string): Promise<ClaimedEvent | undefined> {
@@ -401,6 +705,31 @@ async function project(graph: GraphCatalogProjectionPort, event: ClaimedEvent): 
       serviceId: requiredString(payload.serviceId),
       aggregateVersion: Number(event.aggregate_version),
     });
+  } else if (event.event_type === 'service.delete') {
+    if (!graph.deleteService) throw new Error('Graph projector does not support service deletion');
+    await graph.deleteService({
+      orgId: event.org_id,
+      id: requiredString(payload.id),
+      aggregateVersion: Number(event.aggregate_version),
+    });
+  } else if (event.event_type === 'dependency.unlink') {
+    if (!graph.unlinkDependency)
+      throw new Error('Graph projector does not support dependency unlink');
+    await graph.unlinkDependency({
+      orgId: event.org_id,
+      dependentId: requiredString(payload.dependentId),
+      dependencyId: requiredString(payload.dependencyId),
+      aggregateVersion: Number(event.aggregate_version),
+    });
+  } else if (event.event_type === 'incident.service.unlink') {
+    if (!graph.unlinkIncidentFromService)
+      throw new Error('Graph projector does not support incident unlink');
+    await graph.unlinkIncidentFromService({
+      orgId: event.org_id,
+      incidentId: requiredString(payload.incidentId),
+      serviceId: requiredString(payload.serviceId),
+      aggregateVersion: Number(event.aggregate_version),
+    });
   } else {
     throw new Error(`Unknown graph catalog event type: ${event.event_type}`);
   }
@@ -412,6 +741,92 @@ async function ensureService(client: PoolClient, orgId: string, id: string): Pro
      VALUES($1,$2,$2,'service') ON CONFLICT(org_id,id) DO NOTHING`,
     [orgId, id]
   );
+}
+
+async function upsertIncidentService(
+  client: PoolClient,
+  input: IncidentServiceLinkInput
+): Promise<void> {
+  const aggregateId = encodeAggregateTuple(input.incidentId, input.serviceId);
+  await client.query(
+    `INSERT INTO graph_catalog_incident_services(org_id,incident_id,service_id,incident_title)
+     VALUES($1,$2,$3,$4)
+     ON CONFLICT(org_id,incident_id,service_id) DO UPDATE SET
+       incident_title=EXCLUDED.incident_title,
+       version=graph_catalog_incident_services.version+1, updated_at=NOW()`,
+    [input.orgId, input.incidentId, input.serviceId, input.title.trim()]
+  );
+  await appendOutbox(client, {
+    orgId: input.orgId,
+    aggregateType: 'incident-service',
+    aggregateId,
+    aggregateVersion: await nextAggregateVersion(client, input.orgId, 'incident-service', [
+      input.incidentId,
+      input.serviceId,
+    ]),
+    eventType: 'incident.service.link',
+    payload: {
+      incidentId: input.incidentId,
+      title: input.title.trim(),
+      serviceId: input.serviceId,
+    },
+  });
+}
+
+async function nextAggregateVersion(
+  client: PoolClient,
+  orgId: string,
+  aggregateType: string,
+  identity: string[]
+): Promise<number> {
+  // Use structured payload identity, not aggregate_id: older outbox rows used
+  // delimiter IDs while newer rows use tuple-v1, but both represent one aggregate.
+  const key = JSON.stringify([orgId, aggregateType, ...identity]);
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [key]);
+  let identityPredicate: string;
+  if (aggregateType === 'service' && identity.length === 1) {
+    identityPredicate = "payload->>'id'=$3";
+  } else if (aggregateType === 'dependency' && identity.length === 2) {
+    identityPredicate = "payload->>'dependentId'=$3 AND payload->>'dependencyId'=$4";
+  } else if (aggregateType === 'incident-service' && identity.length === 2) {
+    identityPredicate = "payload->>'incidentId'=$3 AND payload->>'serviceId'=$4";
+  } else {
+    throw new Error('Unsupported graph aggregate identity');
+  }
+  const result = await client.query<{ version: string | number | null }>(
+    `SELECT max(aggregate_version) AS version FROM graph_catalog_outbox
+     WHERE org_id=$1 AND aggregate_type=$2 AND ${identityPredicate}`,
+    [orgId, aggregateType, ...identity]
+  );
+  return Number(result.rows[0]?.version || 0) + 1;
+}
+
+async function lockCatalogWrite(client: PoolClient, orgId: string): Promise<void> {
+  await client.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))', [
+    `tracemind-graph-projection:${orgId}`,
+  ]);
+}
+
+async function withProjectionLock<T>(
+  pool: Pool,
+  orgId: string,
+  exclusive: boolean,
+  callback: () => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  const key = `tracemind-graph-projection:${orgId}`;
+  const lock = exclusive ? 'pg_advisory_lock' : 'pg_advisory_lock_shared';
+  const unlock = exclusive ? 'pg_advisory_unlock' : 'pg_advisory_unlock_shared';
+  try {
+    await client.query(`SELECT ${lock}(hashtextextended($1,0))`, [key]);
+    return await callback();
+  } finally {
+    try {
+      await client.query(`SELECT ${unlock}(hashtextextended($1,0))`, [key]);
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function appendOutbox(
