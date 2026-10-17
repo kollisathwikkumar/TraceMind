@@ -12,3 +12,34 @@ export function safeAuthReturnTarget(
     return undefined;
   }
 }
+
+/**
+ * Preserve Auth0 organization invitations while keeping the organization
+ * selected by trusted server configuration authoritative.
+ */
+export function organizationLoginAuthorizationParams(
+  configuredOrganizationId: string,
+  search: string
+): { organization: string; invitation?: string } | null {
+  const query = new URLSearchParams(search);
+  const requestedOrganization = query.get('organization');
+  const invitation = query.get('invitation');
+
+  if (query.has('organization') && requestedOrganization !== configuredOrganizationId) return null;
+  if (query.has('invitation') && (!invitation || !requestedOrganization)) return null;
+
+  return invitation
+    ? { organization: configuredOrganizationId, invitation }
+    : { organization: configuredOrganizationId };
+}
+
+/** Avoid reusing an invitation token after Auth0 has accepted the invitation. */
+export function authReturnToWithoutInvitation(
+  location: Pick<Location, 'pathname' | 'search' | 'hash'>
+): string {
+  const query = new URLSearchParams(location.search);
+  query.delete('invitation');
+  query.delete('organization');
+  const serializedQuery = query.toString();
+  return `${location.pathname}${serializedQuery ? `?${serializedQuery}` : ''}${location.hash}`;
+}

@@ -13,7 +13,11 @@ import { GraphEvidence } from './components/GraphEvidence';
 import { Remediations } from './components/Remediations';
 import { EvaluationAnalyticsPage } from './components/EvaluationAnalytics';
 import { Settings } from './components/Settings';
-import { safeAuthReturnTarget } from './auth-routing';
+import {
+  authReturnToWithoutInvitation,
+  organizationLoginAuthorizationParams,
+  safeAuthReturnTarget,
+} from './auth-routing';
 import { RedirectFirstAuth0Client } from './redirect-first-auth0-client';
 
 interface AuthConfig {
@@ -72,7 +76,13 @@ function renderPage(route: ReturnType<typeof parseHash>, api: AdminApi): React.R
   }
 }
 
-function Auth0LoginScreen({ authError }: { authError?: Error }) {
+function Auth0LoginScreen({
+  authError,
+  organizationId,
+}: {
+  authError?: Error;
+  organizationId: string;
+}) {
   const { loginWithRedirect } = useAuth0();
   const [redirectError, setRedirectError] = useState<Error | null>(null);
   const started = useRef(false);
@@ -80,14 +90,27 @@ function Auth0LoginScreen({ authError }: { authError?: Error }) {
   useEffect(() => {
     if (authError || started.current) return;
     started.current = true;
-    const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    void loginWithRedirect({ appState: { returnTo } }).catch((reason: unknown) => {
+    const authorizationParams = organizationLoginAuthorizationParams(
+      organizationId,
+      window.location.search
+    );
+    if (!authorizationParams) {
       started.current = false;
       setRedirectError(
-        reason instanceof Error ? reason : new Error('Could not start Auth0 sign-in')
+        new Error('This invitation link is invalid or belongs to a different organization.')
       );
-    });
-  }, [authError, loginWithRedirect]);
+      return;
+    }
+    const returnTo = authReturnToWithoutInvitation(window.location);
+    void loginWithRedirect({ authorizationParams, appState: { returnTo } }).catch(
+      (reason: unknown) => {
+        started.current = false;
+        setRedirectError(
+          reason instanceof Error ? reason : new Error('Could not start Auth0 sign-in')
+        );
+      }
+    );
+  }, [authError, loginWithRedirect, organizationId]);
 
   const error = authError ?? redirectError;
   if (error) {
@@ -197,8 +220,8 @@ function AuthenticatedApp({
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [handleHashChange]);
   if (isLoading) return <AuthInitializationScreen />;
-  if (error) return <Auth0LoginScreen authError={error} />;
-  if (!isAuthenticated) return <Auth0LoginScreen />;
+  if (error) return <Auth0LoginScreen authError={error} organizationId={organizationId} />;
+  if (!isAuthenticated) return <Auth0LoginScreen organizationId={organizationId} />;
   const api = new AdminApi(async () => {
     const token = await getAccessTokenSilently({
       authorizationParams: { audience: config.audience, organization: organizationId },

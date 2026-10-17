@@ -120,9 +120,11 @@ Environment variables take precedence over file values:
 | `AUTH0_DOMAIN` | Auth0 tenant for remote dashboard authentication. |
 | `AUTH0_CLIENT_ID` | Auth0 SPA client identifier. |
 | `AUTH0_AUDIENCE` | Identifier of the Auth0 API that issues dashboard access tokens. |
+| `TRACEMIND_ORG_ID` | Auth0 `org_...` organization ID for a single-organization deployment. |
+| `TRACEMIND_ORG_IDS` | Comma-separated Auth0 `org_...` organization allowlist for a multi-organization deployment; takes precedence over `TRACEMIND_ORG_ID`. |
 | `TRACEMIND_CREDENTIAL_ENCRYPTION_KEY` | Stable encryption key required to store personal provider keys in PostgreSQL. |
 
-Set the Auth0 SPA callback, logout URL, and allowed web origin to the dashboard origin. Configure Google and database/email-password login connections in Auth0. The browser uses Authorization Code with PKCE; the API validates JWT issuer, audience, expiry, and signature. Provider API keys are encrypted server-side and scoped to the authenticated subject when PostgreSQL and the encryption key are configured.
+For remote Auth0 login, configure at least one real Auth0 organization ID in `TRACEMIND_ORG_ID` or `TRACEMIND_ORG_IDS`; the dashboard cannot complete organization-scoped login when both are empty. Set the Auth0 SPA callback, logout URL, and allowed web origin to the dashboard origin. Configure Google and database/email-password login connections in Auth0. The browser uses Authorization Code with PKCE; the API validates JWT issuer, audience, expiry, and signature. Provider API keys are encrypted server-side and scoped to the authenticated subject when PostgreSQL and the encryption key are configured.
 
 Do not commit `.env` files, API keys, database credentials, or production data.
 
