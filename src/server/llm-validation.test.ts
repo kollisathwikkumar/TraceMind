@@ -200,7 +200,7 @@ describe('LLM validation fallback', () => {
     );
   });
 
-  it('disables reasoning and bounds the probe for OpenAI-compatible providers', async () => {
+  it('allows enough reasoning output for hosted OpenAI-compatible providers', async () => {
     createLLMClient.mockReturnValue({
       chat: vi.fn().mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
     });
@@ -222,9 +222,9 @@ describe('LLM validation fallback', () => {
     });
     expect(createLLMClient).toHaveBeenCalledWith(
       expect.objectContaining({
-        maxTokens: 256,
-        requestTimeoutMs: 45_000,
-        extraBody: { chat_template_kwargs: { enable_thinking: false } },
+        maxTokens: 16_384,
+        requestTimeoutMs: 90_000,
+        extraBody: { chat_template_kwargs: { enable_thinking: true } },
         apiKey: 'primary-test-key',
       })
     );

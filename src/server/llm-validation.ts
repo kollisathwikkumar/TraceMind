@@ -112,10 +112,14 @@ export async function validateLLMProvider(
 ): Promise<LLMValidationResponse> {
   const base = {
     ...config.llm,
-    maxTokens: 256,
-    requestTimeoutMs: 45_000,
+    // Nemotron 3.5 Lightning may spend the early output budget on its
+    // reasoning trace; NVIDIA's hosted example allows 16k tokens so the
+    // user-visible answer can follow. Keep the deadline bounded but long
+    // enough for the hosted model's first-use warm-up.
+    maxTokens: config.llm.provider === 'openai-compatible' ? 16_384 : 256,
+    requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
     ...(config.llm.provider === 'openai-compatible'
-      ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } }
+      ? { extraBody: { chat_template_kwargs: { enable_thinking: true } } }
       : {}),
   };
 
