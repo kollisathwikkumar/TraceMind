@@ -85,7 +85,7 @@ describe('local Auth0 JWT → HTTP → tenant persistence integration', () => {
     });
     const verify = createAuth0TokenVerifier(auth0, jwks);
     const mint = (organizationId: string) =>
-      new SignJWT({ org_id: organizationId, scope: 'knowledge:write' })
+      new SignJWT({ org_id: organizationId, scope: 'knowledge:read' })
         .setProtectedHeader({ alg: 'RS256', kid: 'local-test-key' })
         .setIssuer(auth0.issuer)
         .setAudience(auth0.audience)

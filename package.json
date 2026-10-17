@@ -22,6 +22,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:tenant-map": "tsx scripts/tenant-map.ts",
+    "auth0:org:onboard-member": "tsx scripts/auth0-onboard-member.ts",
     "knowledge:migrate-postgres": "tsx scripts/migrate-knowledge-to-postgres.ts",
     "eval:investigate": "tsx src/eval/investigation-benchmark.ts",
     "eval:setup": "tsx src/eval/setup-datasets.ts",

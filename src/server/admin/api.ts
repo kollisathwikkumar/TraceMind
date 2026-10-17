@@ -158,11 +158,12 @@ export class AdminApi {
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const scope = requiredScopeForAdminRequest(method, path);
     const token =
       typeof this.credential === 'string'
         ? this.credential
         : typeof this.credential === 'function'
-          ? await this.credential(path === '/api/v1/llm/validate' ? 'llm:validate' : undefined)
+          ? await this.credential(scope)
           : undefined;
     const res = await fetch(path, {
       method,
@@ -183,13 +184,33 @@ export class AdminApi {
       throw this.unexpectedResponse(path, res, contentType);
     }
 
-    let json: { data?: T; error?: { message?: string } };
+    let json: { data?: T; error?: { code?: string; message?: string } };
     try {
       json = (await res.json()) as { data?: T; error?: { message?: string } };
     } catch {
       throw this.unexpectedResponse(path, res, contentType);
     }
     if (!res.ok) {
+      const code = json.error?.code ?? '';
+      const message = json.error?.message ?? '';
+      if (code === 'insufficient_scope') {
+        const permission = message.match(/Required permission:\s*([a-z:_-]+)/i)?.[1];
+        throw new Error(
+          permission
+            ? `Your TraceMind organization role is missing ${permission}. Ask your administrator to add that permission, then sign out and back in.`
+            : 'Your TraceMind organization role is missing a required permission. Ask your administrator to review your role, then sign out and back in.'
+        );
+      }
+      if (code === 'tenant_required') {
+        throw new Error(
+          'This sign-in is not associated with a TraceMind organization. Use your organization invite or ask your administrator to add your account.'
+        );
+      }
+      if (code === 'tenant_forbidden') {
+        throw new Error(
+          'This TraceMind organization is not enabled for this service. Ask your administrator to verify the organization setup.'
+        );
+      }
       throw new Error(json.error?.message || `Request failed: ${res.status}`);
     }
     return json.data as T;
@@ -352,4 +373,40 @@ export class AdminApi {
   > {
     return this.request('GET', `/api/v1/evaluations/cases?dataset=${encodeURIComponent(dataset)}`);
   }
+}
+
+/** Request only the permission for the operation being invoked, never the full dashboard scope set. */
+export function requiredScopeForAdminRequest(
+  method: string,
+  requestPath: string
+): string | undefined {
+  const path = requestPath.split('?')[0];
+  const verb = method.toUpperCase();
+  if (path === '/api/v1/llm/validate') return 'llm:validate';
+  if (path === '/api/v1/settings/provider-key') return 'settings:keys';
+  if (/^\/api\/v1\/incidents\/[^/]+\/investigations$/.test(path)) {
+    return verb === 'GET' ? 'incidents:read' : 'incidents:write';
+  }
+  if (path === '/api/v1/graph/reconcile' && verb === 'POST') return 'graph:admin';
+  if (path.startsWith('/api/v1/graph/')) return verb === 'GET' ? 'graph:read' : 'graph:write';
+  if (path === '/api/v1/incidents' || path.startsWith('/api/v1/incidents/')) {
+    if (path.includes('/remediations')) return 'remediations:propose';
+    return verb === 'GET' ? 'incidents:read' : 'incidents:write';
+  }
+  if (path.startsWith('/api/v1/remediations/')) {
+    const action = path.split('/').at(-1);
+    if (verb === 'GET') return 'remediations:read';
+    if (action === 'approval' || action === 'rollback-approval') return 'remediations:approve';
+    if (action === 'execute') return 'remediations:execute';
+    if (action === 'rollback') return 'remediations:rollback';
+    if (action === 'reconcile') return 'remediations:reconcile';
+  }
+  if (path.startsWith('/api/v1/evaluations/')) {
+    return verb === 'GET' ? 'evaluations:read' : 'evaluations:write';
+  }
+  if (path.startsWith('/api/v1/knowledge/')) {
+    if (path === '/api/v1/knowledge/search') return 'knowledge:read';
+    return verb === 'GET' ? 'knowledge:read' : 'knowledge:write';
+  }
+  return undefined;
 }

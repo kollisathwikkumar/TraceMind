@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
 import { AdminApi } from './api';
+import { dashboardTokenError } from './auth-errors';
 import { Layout } from './components/Layout';
 import { Dashboard } from './components/Dashboard';
 import { DocumentList } from './components/DocumentList';
@@ -223,16 +224,20 @@ function AuthenticatedApp({
   if (isLoading) return <AuthInitializationScreen />;
   if (error) return <Auth0LoginScreen authError={error} organizationId={organizationId} />;
   if (!isAuthenticated) return <Auth0LoginScreen organizationId={organizationId} />;
-  const api = new AdminApi(async () => {
-    const token = await getAccessTokenSilently({
-      authorizationParams: {
-        audience: config.audience,
-        organization: organizationId,
-        scope: DASHBOARD_AUTHORIZATION_SCOPE,
-      },
-    });
-    if (!token) throw new Error('No access token was returned for the TraceMind API');
-    return token;
+  const api = new AdminApi(async (scope) => {
+    try {
+      const token = await getAccessTokenSilently({
+        authorizationParams: {
+          audience: config.audience,
+          organization: organizationId,
+          ...(scope ? { scope } : {}),
+        },
+      });
+      if (!token) throw new Error('empty_access_token');
+      return token;
+    } catch (tokenError) {
+      throw dashboardTokenError(tokenError);
+    }
   });
   return (
     <Layout

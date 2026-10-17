@@ -240,7 +240,7 @@ describe('incident API', () => {
         token === 'tenant-b'
           ? {
               sub: 'auth0|tenant-b',
-              scopes: ['knowledge:write', 'mcp:access'],
+              scopes: ['knowledge:read', 'mcp:access'],
               roles: [],
               organizationId: 'org-b',
             }

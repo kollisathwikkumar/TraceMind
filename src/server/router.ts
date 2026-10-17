@@ -769,6 +769,8 @@ function requiredScopeFor(path: string, method: string): string | undefined {
     return method === 'GET' ? 'evaluations:read' : 'evaluations:write';
   }
   if (path.startsWith('/api/v1/knowledge/')) {
+    // Search uses POST to carry its query but does not mutate knowledge data.
+    if (path === '/api/v1/knowledge/search') return 'knowledge:read';
     return method === 'GET' ? 'knowledge:read' : 'knowledge:write';
   }
   return undefined;

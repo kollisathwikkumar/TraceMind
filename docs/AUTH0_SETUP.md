@@ -32,6 +32,76 @@ organization. The API independently checks the signed `org_id` claim against its
 allowlist before using it as a tenant, so the browser selection does not grant
 membership or access by itself.
 
+### Scope and onboarding behavior
+
+The dashboard starts Universal Login with only `openid profile email`. It asks
+for API access tokens silently as individual API calls need them, using the
+smallest route-specific permission (for example `incidents:read` for incident
+reads and `incidents:write` for incident creation). Auth0's API must have RBAC
+enabled and the required permissions defined. Assign narrowly scoped roles to
+organization members during onboarding; do not give ordinary members write,
+admin, or remediation-executor permissions by default. A genuine missing-scope
+or tenant error is shown in the dashboard as an actionable message.
+
+For first-party dashboard login, inspect the Auth0 Dashboard's API settings for
+the TraceMind API and review **Allow Skipping User Consent**. Enable it only if
+TraceMind is a first-party application and that matches the organization's
+consent policy. This is an Auth0 tenant setting and is not controlled by this
+repository; verify it in the tenant before claiming the setting is active.
+
+### Provision a read-only organization member
+
+The onboarding CLI is dry-run by default. It validates that the requested
+organization is in `TRACEMIND_ORG_ID` or `TRACEMIND_ORG_IDS`, that the user and
+organization exist, and that the configured role is a read-only role containing
+only the supported TraceMind read permissions. The baseline role must include
+`incidents:read`, `knowledge:read`, and `graph:read`; `remediations:read` and
+`evaluations:read` may be added when those screens should be available. It prints
+the planned membership and role changes without applying them unless `--apply`
+is supplied.
+
+Create or select an Auth0 **Machine to Machine** application authorized for the
+Auth0 Management API. Grant only these Management API permissions to that M2M
+application:
+
+```text
+read:users
+read:organizations
+read:roles
+read:organization_member_roles
+create:organization_members
+create:organization_member_roles
+```
+
+Set these server-side environment variables in a private shell (never commit
+them or paste the client secret into the dashboard/browser):
+
+```sh
+export AUTH0_DOMAIN='your-tenant.us.auth0.com'
+export AUTH0_MGMT_CLIENT_ID='...'
+export AUTH0_MGMT_CLIENT_SECRET='...'
+export AUTH0_AUDIENCE='https://api.your-domain.example'
+export AUTH0_BASELINE_READONLY_ROLE_ID='rol_...'
+export TRACEMIND_ORG_ID='org_...'
+```
+
+Use the exact Auth0 user ID from the user's profile (for example
+`google-oauth2|...`), and review the dry-run output first:
+
+```sh
+npm run auth0:org:onboard-member -- --org-id org_... --user-id 'google-oauth2|...'
+```
+
+Only after confirming the organization, identity, and role in the plan, apply:
+
+```sh
+npm run auth0:org:onboard-member -- --org-id org_... --user-id 'google-oauth2|...' --apply
+```
+
+The CLI applies organization membership and the existing read-only role
+idempotently. It does not create roles, grant write permissions, or change the
+Auth0 consent setting. Configure a separate deliberate role for write actions.
+
 ## PostgreSQL and personal provider keys
 
 The backend uses PostgreSQL when `TRACEMIND_DATABASE_URL` (or the existing
