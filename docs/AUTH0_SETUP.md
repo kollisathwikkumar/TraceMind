@@ -43,6 +43,16 @@ organization members during onboarding; do not give ordinary members write,
 admin, or remediation-executor permissions by default. A genuine missing-scope
 or tenant error is shown in the dashboard as an actionable message.
 
+The API must define the scopes used by the router before clients request them:
+`incidents:read`, `incidents:write`, `knowledge:read`, `knowledge:write`,
+`graph:read`, `graph:write`, `graph:admin`, `llm:validate`, `settings:keys`,
+`remediations:propose`, `remediations:read`, `remediations:approve`,
+`remediations:execute`, `remediations:rollback`, `remediations:reconcile`,
+`evaluations:read`, `evaluations:write`, and `mcp:access` when MCP is enabled.
+Defining a permission does not grant it: only include permissions in roles for
+the users who need them. A new baseline read-only role needs only
+`incidents:read`, `knowledge:read`, and `graph:read`.
+
 For first-party dashboard login, inspect the Auth0 Dashboard's API settings for
 the TraceMind API and review **Allow Skipping User Consent**. Enable it only if
 TraceMind is a first-party application and that matches the organization's
