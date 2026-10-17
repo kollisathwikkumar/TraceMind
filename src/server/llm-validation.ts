@@ -139,16 +139,7 @@ export async function validateLLMProvider(
     // hosted NIM guide uses this direct-answer mode for simple prompts.
     maxTokens: config.llm.provider === 'openai-compatible' ? 512 : 256,
     requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
-    ...(config.llm.provider === 'openai-compatible'
-      ? {
-          extraBody: {
-            chat_template_kwargs: {
-              enable_thinking: false,
-              ...(usesNvidiaNim ? { force_nonempty_content: true } : {}),
-            },
-          },
-        }
-      : {}),
+    ...(usesNvidiaNim ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } } : {}),
   };
 
   // Runtime environment is the deployment source of truth. Prefer it over a

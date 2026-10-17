@@ -267,7 +267,7 @@ describe('LLM validation fallback', () => {
     );
   });
 
-  it('allows enough reasoning output for hosted OpenAI-compatible providers', async () => {
+  it('uses NVIDIA direct-answer request options for NVIDIA NIM validation', async () => {
     createLLMClient.mockReturnValue({
       chat: vi
         .fn()
@@ -295,13 +295,33 @@ describe('LLM validation fallback', () => {
         maxTokens: 512,
         requestTimeoutMs: 90_000,
         extraBody: {
-          chat_template_kwargs: {
-            enable_thinking: false,
-            force_nonempty_content: true,
-          },
+          chat_template_kwargs: { enable_thinking: false },
         },
         apiKey: 'primary-test-key',
       })
+    );
+  });
+
+  it('does not send NVIDIA-specific template fields to other OpenAI-compatible hosts', async () => {
+    createLLMClient.mockReturnValue({
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
+    });
+    const compatibleConfig = {
+      ...DEFAULT_CONFIG,
+      llm: {
+        ...DEFAULT_CONFIG.llm,
+        provider: 'openai-compatible' as const,
+        model: 'vendor/model',
+        apiBaseUrl: 'https://api.example.test/v1/',
+      },
+    };
+
+    await validateLLMProvider(compatibleConfig, { TRACEMIND_LLM_API_KEY: 'primary-test-key' });
+
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.not.objectContaining({ extraBody: expect.anything() })
     );
   });
 
