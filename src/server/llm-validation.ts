@@ -42,6 +42,72 @@ class EmptyLLMResponseError extends Error {
   }
 }
 
+interface CompatibleChatCompletion {
+  choices?: Array<{
+    message?: { content?: string | Array<{ type?: string; text?: string }> | null };
+  }>;
+}
+
+/** NVIDIA's hosted endpoint is OpenAI-compatible but its streaming responses
+ * are occasionally surfaced as usage/reasoning-only chunks by the generic
+ * adapter. Use its documented non-streaming Chat Completions contract for the
+ * short connection probe, and keep the rest of the application on pi-ai. */
+async function validateOpenAICompatible(
+  config: Config,
+  apiKey: string | undefined,
+  timeoutMs: number
+): Promise<string> {
+  if (!config.llm.apiBaseUrl) throw new Error('OpenAI-compatible provider requires llm.apiBaseUrl');
+  if (!apiKey) throw new Error('OpenAI-compatible provider API key is not configured');
+
+  const baseUrl = config.llm.apiBaseUrl.replace(/\/+$/, '');
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+    body: JSON.stringify({
+      model: config.llm.model,
+      messages: [
+        { role: 'system', content: VALIDATION_SYSTEM_PROMPT },
+        { role: 'user', content: VALIDATION_USER_PROMPT },
+      ],
+      max_tokens: 128,
+      temperature: 0,
+      stream: false,
+      chat_template_kwargs: { enable_thinking: false },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = new Error(`OpenAI-compatible provider returned HTTP ${response.status}`);
+    Object.assign(error, { status: response.status });
+    throw error;
+  }
+
+  let payload: CompatibleChatCompletion;
+  try {
+    payload = (await response.json()) as CompatibleChatCompletion;
+  } catch {
+    throw new Error('OpenAI-compatible provider returned invalid JSON');
+  }
+  const content = payload.choices?.[0]?.message?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((part) => part.type === 'text' && typeof part.text === 'string')
+            .map((part) => part.text)
+            .join('')
+        : '';
+  if (!text.trim()) throw new EmptyLLMResponseError();
+  return text.trim();
+}
+
 function statusFromError(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
   const candidate = error as {
@@ -113,12 +179,6 @@ export async function validateLLMProvider(
   const base = {
     ...config.llm,
     requestTimeoutMs: 45_000,
-    extraBody: {
-      chat_template_kwargs: {
-        enable_thinking: false,
-        force_nonempty_content: true,
-      },
-    },
   };
 
   // Runtime environment is the deployment source of truth. Prefer it over a
@@ -129,25 +189,27 @@ export async function validateLLMProvider(
     environment.NVIDIA_API_KEY?.trim() ||
     config.llm.apiKey;
   const fallbackKey = environment.TRACEMIND_LLM_FALLBACK_API_KEY?.trim();
-
-  try {
-    const result = await createLLMClient({ ...base, apiKey: primaryKey }).chat(
+  const runAttempt = async (apiKey: string | undefined): Promise<string> => {
+    if (config.llm.provider === 'openai-compatible') {
+      return validateOpenAICompatible(config, apiKey, base.requestTimeoutMs);
+    }
+    const result = await createLLMClient({ ...base, apiKey }).chat(
       VALIDATION_SYSTEM_PROMPT,
       VALIDATION_USER_PROMPT
     );
     const content = result.content.trim();
     if (!content) throw new EmptyLLMResponseError();
+    return content;
+  };
+
+  try {
+    const content = await runAttempt(primaryKey);
     return { content, usedFallback: false };
   } catch (primaryError) {
     const attempts = [classifyLLMProviderFailure(primaryError, 'primary')];
     if (!fallbackKey || fallbackKey === primaryKey) throw new LLMValidationError(attempts);
     try {
-      const result = await createLLMClient({ ...base, apiKey: fallbackKey }).chat(
-        VALIDATION_SYSTEM_PROMPT,
-        VALIDATION_USER_PROMPT
-      );
-      const content = result.content.trim();
-      if (!content) throw new EmptyLLMResponseError();
+      const content = await runAttempt(fallbackKey);
       return { content, usedFallback: true };
     } catch (fallbackError) {
       attempts.push(classifyLLMProviderFailure(fallbackError, 'fallback'));

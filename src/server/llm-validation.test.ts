@@ -19,6 +19,7 @@ describe('LLM validation fallback', () => {
 
   beforeEach(() => {
     createLLMClient.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it('retries once with the fallback key when the primary provider call fails', async () => {
@@ -197,5 +198,107 @@ describe('LLM validation fallback', () => {
       2,
       expect.objectContaining({ apiKey: 'fallback-test-key' })
     );
+  });
+
+  it('uses the non-streaming OpenAI-compatible contract for hosted model validation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'TraceMind model connection successful.' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const compatibleConfig = {
+      ...DEFAULT_CONFIG,
+      llm: {
+        ...DEFAULT_CONFIG.llm,
+        provider: 'openai-compatible' as const,
+        model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+        apiBaseUrl: 'https://integrate.api.nvidia.com/v1/',
+      },
+    };
+
+    await expect(
+      validateLLMProvider(compatibleConfig, { TRACEMIND_LLM_API_KEY: 'primary-test-key' })
+    ).resolves.toEqual({
+      content: 'TraceMind model connection successful.',
+      usedFallback: false,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://integrate.api.nvidia.com/v1/chat/completions',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer primary-test-key' }),
+        body: expect.stringContaining('"stream":false'),
+      })
+    );
+    expect(createLLMClient).not.toHaveBeenCalled();
+  });
+
+  it('retries the compatible endpoint with fallback after an empty primary answer', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: 'fallback answer' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const compatibleConfig = {
+      ...DEFAULT_CONFIG,
+      llm: {
+        ...DEFAULT_CONFIG.llm,
+        provider: 'openai-compatible' as const,
+        model: 'test-model',
+        apiBaseUrl: 'https://provider.example/v1',
+      },
+    };
+
+    await expect(
+      validateLLMProvider(compatibleConfig, {
+        TRACEMIND_LLM_API_KEY: 'primary-test-key',
+        TRACEMIND_LLM_FALLBACK_API_KEY: 'fallback-test-key',
+      })
+    ).resolves.toEqual({ content: 'fallback answer', usedFallback: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1]).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer fallback-test-key' }),
+      })
+    );
+  });
+
+  it('reports compatible HTTP status without leaking provider response bodies', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('private provider details', { status: 401 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const compatibleConfig = {
+      ...DEFAULT_CONFIG,
+      llm: {
+        ...DEFAULT_CONFIG.llm,
+        provider: 'openai-compatible' as const,
+        model: 'test-model',
+        apiBaseUrl: 'https://provider.example/v1',
+      },
+    };
+
+    await expect(
+      validateLLMProvider(compatibleConfig, { TRACEMIND_LLM_API_KEY: 'primary-test-key' })
+    ).rejects.toMatchObject({
+      attempts: [{ source: 'primary', category: 'unauthorized', status: 401 }],
+    });
+    await expect(
+      validateLLMProvider(compatibleConfig, { TRACEMIND_LLM_API_KEY: 'primary-test-key' })
+    ).rejects.not.toThrow(/private provider details/);
   });
 });
