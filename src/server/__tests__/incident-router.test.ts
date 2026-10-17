@@ -282,15 +282,28 @@ describe('incident API', () => {
         audience: 'https://api.example.test',
         issuer: 'https://tenant.example.auth0.com/',
       },
-      verifyAuth0Token: async (token: string) =>
-        token === 'alice-token'
-          ? {
-              sub: 'auth0|alice',
-              scopes: ['settings:keys'],
-              roles: [],
-              organizationId: 'default',
-            }
-          : undefined,
+      verifyAuth0Token: async (token: string) => {
+        if (token === 'alice-token') {
+          return {
+            sub: 'auth0|alice',
+            scopes: [],
+            roles: [],
+            organizationId: 'default',
+          };
+        }
+        if (token === 'missing-org-token') {
+          return { sub: 'auth0|missing-org', scopes: [], roles: [] };
+        }
+        if (token === 'foreign-org-token') {
+          return {
+            sub: 'auth0|foreign-org',
+            scopes: [],
+            roles: [],
+            organizationId: 'org-foreign',
+          };
+        }
+        return undefined;
+      },
       providerKeyStore: {
         getStatus: async (subject: string) =>
           saved.has(subject)
@@ -342,6 +355,20 @@ describe('incident API', () => {
         })
       ).status
     ).toBe(401);
+    expect(
+      await (
+        await fetch(`${base}/api/v1/settings/provider-key`, {
+          headers: { Authorization: 'Bearer missing-org-token' },
+        })
+      ).json()
+    ).toMatchObject({ error: { code: 'tenant_required' } });
+    expect(
+      await (
+        await fetch(`${base}/api/v1/settings/provider-key`, {
+          headers: { Authorization: 'Bearer foreign-org-token' },
+        })
+      ).json()
+    ).toMatchObject({ error: { code: 'tenant_forbidden' } });
   });
 
   it('enforces Auth0 scopes and rejects organizations outside the configured allowlist', async () => {
