@@ -77,25 +77,33 @@ describe.skipIf(!connectionString)(
         const projected: string[] = [];
         const graph: GraphCatalogProjectionPort = {
           async upsertService(input) {
-            projected.push(`service:${input.orgId}:${input.id}:${input.name}:v${input.aggregateVersion}`);
+            projected.push(
+              `service:${input.orgId}:${input.id}:${input.name}:v${input.aggregateVersion}`
+            );
           },
           async linkDependency(input) {
-            projected.push(`dependency:${input.orgId}:${input.dependentId}:${input.dependencyId}:v${input.aggregateVersion}`);
+            projected.push(
+              `dependency:${input.orgId}:${input.dependentId}:${input.dependencyId}:v${input.aggregateVersion}`
+            );
           },
           async linkIncidentToService(input) {
-            projected.push(`incident:${input.orgId}:${input.incidentId}:${input.serviceId}:v${input.aggregateVersion}`);
+            projected.push(
+              `incident:${input.orgId}:${input.incidentId}:${input.serviceId}:v${input.aggregateVersion}`
+            );
           },
         };
         expect(await catalog.replay(graph, 'org-a')).toEqual({ processed: 4, failed: 0 });
         expect(await catalog.replay(graph, 'org-b')).toEqual({ processed: 1, failed: 0 });
         expect(await catalog.replay(graph, 'org-a')).toEqual({ processed: 0, failed: 0 });
-        expect(projected).toEqual(expect.arrayContaining([
-          'service:org-a:api:API:v1',
-          'service:org-a:db:Database:v1',
-          'dependency:org-a:api:db:v1',
-          'incident:org-a:inc-1:api:v1',
-          'service:org-b:api:Other tenant API:v1',
-        ]));
+        expect(projected).toEqual(
+          expect.arrayContaining([
+            'service:org-a:api:API:v1',
+            'service:org-a:db:Database:v1',
+            'dependency:org-a:api:db:v1',
+            'incident:org-a:inc-1:api:v1',
+            'service:org-b:api:Other tenant API:v1',
+          ])
+        );
         expect(
           (
             await pool.query(
@@ -150,22 +158,41 @@ describe.skipIf(!connectionString)(
         await catalog.upsertService({ orgId: 'org-a', id: 'fenced', name: 'Fenced service' });
         let announceStarted!: () => void;
         let releaseFirst!: () => void;
-        const started = new Promise<void>((resolve) => { announceStarted = resolve; });
-        const firstMayReturn = new Promise<void>((resolve) => { releaseFirst = resolve; });
+        const started = new Promise<void>((resolve) => {
+          announceStarted = resolve;
+        });
+        const firstMayReturn = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
         const slowGraph: GraphCatalogProjectionPort = {
-          async upsertService() { announceStarted(); await firstMayReturn; },
+          async upsertService() {
+            announceStarted();
+            await firstMayReturn;
+          },
           async linkDependency() {},
           async linkIncidentToService() {},
         };
         const first = catalog.replay(slowGraph, 'org-a', 1);
         await started;
-        await pool.query("UPDATE graph_catalog_outbox SET lease_until=NOW()-INTERVAL '1 second' WHERE org_id='org-a'");
-        expect(await catalog.replay({
-          async upsertService() {}, async linkDependency() {}, async linkIncidentToService() {},
-        }, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
+        await pool.query(
+          "UPDATE graph_catalog_outbox SET lease_until=NOW()-INTERVAL '1 second' WHERE org_id='org-a'"
+        );
+        expect(
+          await catalog.replay(
+            {
+              async upsertService() {},
+              async linkDependency() {},
+              async linkIncidentToService() {},
+            },
+            'org-a',
+            1
+          )
+        ).toEqual({ processed: 1, failed: 0 });
         releaseFirst();
         expect(await first).toEqual({ processed: 0, failed: 0 });
-        const row = (await pool.query('SELECT processed_at,lease_token,attempts FROM graph_catalog_outbox')).rows[0];
+        const row = (
+          await pool.query('SELECT processed_at,lease_token,attempts FROM graph_catalog_outbox')
+        ).rows[0];
         expect(row.processed_at).toBeTruthy();
         expect(row.lease_token).toBeNull();
         expect(row.attempts).toBe(2);
@@ -224,6 +251,67 @@ describe.skipIf(!connectionString)(
         expect(await catalog.replay(graph, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
         expect(await catalog.replay(graph, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
         expect(criticalities).toEqual(['degraded', 'critical']);
+      } finally {
+        await pool.end();
+        await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+        await admin.end();
+      }
+    });
+
+    it('keeps delimiter-colliding dependency pairs as distinct aggregates and orders legacy rows by tuple identity', async () => {
+      const schema = `graph_catalog_tuple_${randomUUID().replaceAll('-', '')}`;
+      const admin = new Pool({ connectionString });
+      await admin.query(`CREATE SCHEMA "${schema}"`);
+      const pool = new Pool({ connectionString, options: `-c search_path=${schema}` });
+      try {
+        await migrateGraphCatalog(pool);
+        const catalog = new PostgresGraphCatalogStore(pool);
+        // These pairs had the same historical dependentId + "->" + dependencyId key.
+        await catalog.linkDependency({
+          orgId: 'org-a',
+          dependentId: 'a->b',
+          dependencyId: 'c',
+          criticality: 'degraded',
+        });
+        await catalog.linkDependency({
+          orgId: 'org-a',
+          dependentId: 'a',
+          dependencyId: 'b->c',
+          criticality: 'optional',
+        });
+        const aggregateIds = (
+          await pool.query(
+            "SELECT aggregate_id FROM graph_catalog_outbox WHERE aggregate_type='dependency' ORDER BY id"
+          )
+        ).rows.map((row: { aggregate_id: string }) => row.aggregate_id);
+        expect(aggregateIds).toHaveLength(2);
+        expect(new Set(aggregateIds).size).toBe(2);
+
+        // Simulate a pending event persisted by the prior release, then append a new-format
+        // update for that same edge. The SQL ordering predicate must join on payload identity.
+        await pool.query(
+          "UPDATE graph_catalog_outbox SET aggregate_id='a->b->c' WHERE id=(SELECT min(id) FROM graph_catalog_outbox)"
+        );
+        await catalog.linkDependency({
+          orgId: 'org-a',
+          dependentId: 'a->b',
+          dependencyId: 'c',
+          criticality: 'critical',
+        });
+
+        const projected: string[] = [];
+        const graph: GraphCatalogProjectionPort = {
+          async upsertService() {},
+          async linkDependency(input) {
+            projected.push(`${input.dependentId}|${input.dependencyId}:${input.criticality}`);
+          },
+          async linkIncidentToService() {},
+        };
+        // The independently colliding edge can replay, but each edge's own versions stay ordered.
+        expect(await catalog.replay(graph, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
+        expect(await catalog.replay(graph, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
+        expect(await catalog.replay(graph, 'org-a', 1)).toEqual({ processed: 1, failed: 0 });
+        expect(projected).toEqual(['a->b|c:degraded', 'a|b->c:optional', 'a->b|c:critical']);
       } finally {
         await pool.end();
         await admin.query(`DROP SCHEMA "${schema}" CASCADE`);

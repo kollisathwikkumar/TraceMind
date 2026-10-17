@@ -56,10 +56,96 @@ export interface IncidentEvidencePath {
 export class FalkorDBStore {
   constructor(private readonly graph: FalkorGraphPort) {}
 
+  /**
+   * Create the range indexes used by tenant-scoped graph lookups before serving
+   * requests. FalkorDB accepts a multi-property range index (v4.22.1); older
+   * deployments may already have single-property indexes, in which case we
+   * preserve them and ensure each required property remains indexed.
+   */
+  async bootstrap(): Promise<void> {
+    // GRAPH.RO_QUERY cannot operate on a graph key FalkorDB has not created yet.
+    // checkHealth initializes only that empty graph case before schema probes.
+    await this.checkHealth();
+    await this.ensureLookupIndexes();
+  }
+
+  private async ensureLookupIndexes(): Promise<void> {
+    const definitions = [
+      { label: 'Service', properties: ['org_id', 'id'] },
+      { label: 'Incident', properties: ['org_id', 'id'] },
+    ] as const;
+
+    for (const definition of definitions) {
+      let indexes = await this.getIndexes();
+      const existing = indexes
+        .filter((row) => row.label === definition.label)
+        .map((row) => row.properties);
+      if (existing.some((properties) => sameProperties(properties, definition.properties)))
+        continue;
+
+      const overlaps = existing.some((properties) =>
+        definition.properties.some((property) => properties.includes(property))
+      );
+      if (!overlaps) {
+        try {
+          await this.graph.query(`CREATE INDEX FOR (n:${definition.label}) ON (n.org_id, n.id)`);
+          continue;
+        } catch (error) {
+          // Concurrent process startup can race while adding the same index.
+          indexes = await this.getIndexes();
+          const created = indexes
+            .filter((row) => row.label === definition.label)
+            .some((row) => sameProperties(row.properties, definition.properties));
+          if (created) continue;
+          throw error;
+        }
+      }
+
+      // A pre-existing partial index cannot be combined with the composite
+      // index without dropping user data structures. Add only missing safe
+      // single-property indexes and keep the existing schema intact.
+      for (const property of definition.properties) {
+        indexes = await this.getIndexes();
+        const alreadyIndexed = indexes
+          .filter((row) => row.label === definition.label)
+          .some((row) => row.properties.includes(property));
+        if (alreadyIndexed) continue;
+        try {
+          await this.graph.query(`CREATE INDEX FOR (n:${definition.label}) ON (n.${property})`);
+        } catch (error) {
+          indexes = await this.getIndexes();
+          const created = indexes
+            .filter((row) => row.label === definition.label)
+            .some((row) => row.properties.includes(property));
+          if (!created) throw error;
+        }
+      }
+    }
+  }
+
+  private async getIndexes(): Promise<Array<{ label: string; properties: string[] }>> {
+    const result = await this.graph.roQuery<unknown[]>('CALL db.indexes()');
+    return this.toRows(result).flatMap((row) => {
+      const label = typeof row.label === 'string' ? row.label : undefined;
+      const properties = Array.isArray(row.properties)
+        ? row.properties.filter((property): property is string => typeof property === 'string')
+        : [];
+      return label && properties.length ? [{ label, properties }] : [];
+    });
+  }
+
   async checkHealth(): Promise<void> {
-    // FalkorDB RO_QUERY requires a graph operation; bare RETURN can be parsed as
-    // an operation against an empty graph key and fail even when the graph is healthy.
-    await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
+    try {
+      await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
+    } catch (error) {
+      // RO_QUERY returns "Invalid graph operation on empty key" for a brand-new
+      // selected graph. A harmless GRAPH.QUERY creates its key; then retry the
+      // read-only probe. Do not mask network, permission, or query errors.
+      if (!(error instanceof Error) || !error.message.toLowerCase().includes('empty key'))
+        throw error;
+      await this.graph.query('RETURN 1 AS health');
+      await this.graph.roQuery('MATCH (n) RETURN count(n) AS health');
+    }
   }
 
   async upsertService(input: {
@@ -108,7 +194,7 @@ export class FalkorDBStore {
        MERGE (dependent)-[r:DEPENDS_ON]->(dependency)
        WITH r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
-       SET r.criticality = $criticality, r.updated_at = timestamp(),
+       SET r.org_id = $orgId, r.criticality = $criticality, r.updated_at = timestamp(),
            r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
@@ -136,7 +222,7 @@ export class FalkorDBStore {
        MERGE (i)-[r:AFFECTS]->(s)
        WITH i,r WHERE ($aggregateVersion IS NULL AND coalesce(r.catalog_version, 0) = 0)
          OR ($aggregateVersion IS NOT NULL AND coalesce(r.catalog_version, 0) < $aggregateVersion)
-       SET i.title = $title, i.updated_at = timestamp(),
+       SET i.title = $title, i.updated_at = timestamp(), r.org_id = $orgId,
            r.catalog_version = coalesce($aggregateVersion, coalesce(r.catalog_version, 0))`,
       {
         params: {
@@ -182,7 +268,8 @@ export class FalkorDBStore {
     const result = await this.graph.roQuery<unknown[]>(
       `MATCH (current:Incident {org_id: $orgId, id: $incidentId})-[:AFFECTS]->(s:Service)
        MATCH (past:Incident {org_id: $orgId})-[:AFFECTS]->(s)
-       WHERE past.id <> current.id
+       WHERE s.org_id = $orgId AND past.id <> current.id
+         AND ALL(n IN [current, past, s] WHERE n.org_id = $orgId)
        WITH past, collect(DISTINCT s.name) AS sharedServices
        RETURN past.id AS id, past.title AS title, sharedServices
        ORDER BY size(sharedServices) DESC, id
@@ -282,6 +369,12 @@ function toObjectRows(value: unknown): GraphRow[] {
     : [];
 }
 
+function sameProperties(actual: string[], expected: readonly string[]): boolean {
+  return (
+    actual.length === expected.length && expected.every((property) => actual.includes(property))
+  );
+}
+
 export async function connectFalkorDB(
   url: string,
   graphName = 'runbook'
@@ -293,8 +386,15 @@ export async function connectFalkorDB(
   client.on('error', () => {
     console.error('FalkorDB client connection error');
   });
+  const store = new FalkorDBStore(client.selectGraph(graphName));
+  try {
+    await store.bootstrap();
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
   return {
-    store: new FalkorDBStore(client.selectGraph(graphName)),
+    store,
     close: () => client.close(),
   };
 }

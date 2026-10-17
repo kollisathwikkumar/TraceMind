@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
-import { grantRuntimeTenantTables, queryForTenant, transactionForTenant } from './postgres-tenant-context';
+import {
+  grantRuntimeTenantTables,
+  queryForTenant,
+  transactionForTenant,
+} from './postgres-tenant-context';
 
 export interface GraphServiceInput {
   orgId: string;
@@ -68,8 +72,11 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
       );
     `);
     await grantRuntimeTenantTables(client, runtimeRole, [
-      'graph_catalog_schema_migrations','graph_catalog_services','graph_catalog_dependencies',
-      'graph_catalog_incident_services','graph_catalog_outbox',
+      'graph_catalog_schema_migrations',
+      'graph_catalog_services',
+      'graph_catalog_dependencies',
+      'graph_catalog_incident_services',
+      'graph_catalog_outbox',
     ]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS graph_catalog_services (
@@ -130,7 +137,9 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
         ON graph_catalog_outbox(org_id, aggregate_type, aggregate_id, aggregate_version)
         WHERE processed_at IS NULL;
     `);
-    await client.query('ALTER TABLE graph_catalog_outbox ADD COLUMN IF NOT EXISTS lease_token TEXT');
+    await client.query(
+      'ALTER TABLE graph_catalog_outbox ADD COLUMN IF NOT EXISTS lease_token TEXT'
+    );
     await client.query(
       'INSERT INTO graph_catalog_schema_migrations(version) VALUES(1) ON CONFLICT(version) DO NOTHING'
     );
@@ -152,10 +161,15 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
  * event commit atomically; FalkorDB is updated asynchronously by replay().
  */
 export class PostgresGraphCatalogStore {
-  constructor(private readonly pool: Pool, private readonly defaultOrgId = 'default') {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly defaultOrgId = 'default'
+  ) {}
 
   async checkHealth(orgId = this.defaultOrgId): Promise<number> {
-    const result = await queryForTenant<{ pending: string | number }>(this.pool, orgId,
+    const result = await queryForTenant<{ pending: string | number }>(
+      this.pool,
+      orgId,
       'SELECT count(*) AS pending FROM graph_catalog_outbox WHERE processed_at IS NULL'
     );
     return Number(result.rows[0]?.pending || 0);
@@ -218,7 +232,7 @@ export class PostgresGraphCatalogStore {
       await appendOutbox(client, {
         orgId: input.orgId,
         aggregateType: 'dependency',
-        aggregateId: `${input.dependentId}->${input.dependencyId}`,
+        aggregateId: encodeAggregateTuple(input.dependentId, input.dependencyId),
         aggregateVersion: Number(result.rows[0].version),
         eventType: 'dependency.link',
         payload: { dependentId: input.dependentId, dependencyId: input.dependencyId, criticality },
@@ -244,7 +258,7 @@ export class PostgresGraphCatalogStore {
       await appendOutbox(client, {
         orgId: input.orgId,
         aggregateType: 'incident-service',
-        aggregateId: `${input.incidentId}->${input.serviceId}`,
+        aggregateId: encodeAggregateTuple(input.incidentId, input.serviceId),
         aggregateVersion: Number(result.rows[0].version),
         eventType: 'incident.service.link',
         payload: {
@@ -279,14 +293,21 @@ export class PostgresGraphCatalogStore {
         );
         if (completed.rowCount) processed++;
       } catch (error) {
-        const released = await queryForTenant(this.pool, orgId,
+        const released = await queryForTenant(
+          this.pool,
+          orgId,
           `UPDATE graph_catalog_outbox
            SET lease_until=NULL,
                lease_token=NULL,
                available_at=NOW()+LEAST(INTERVAL '5 minutes', INTERVAL '2 seconds' * POWER(2, LEAST(attempts,7))),
                last_error=$2
           WHERE id=$1 AND org_id=$3 AND lease_token=$4 AND processed_at IS NULL`,
-          [event.id, error instanceof Error ? error.message.slice(0, 1000) : 'Projection failed', orgId, event.lease_token]
+          [
+            event.id,
+            error instanceof Error ? error.message.slice(0, 1000) : 'Projection failed',
+            orgId,
+            event.lease_token,
+          ]
         );
         if (released.rowCount) failed++;
       }
@@ -304,10 +325,22 @@ export class PostgresGraphCatalogStore {
            AND NOT EXISTS (
              SELECT 1 FROM graph_catalog_outbox older
              WHERE older.org_id=e.org_id AND older.aggregate_type=e.aggregate_type
-               AND older.aggregate_id=e.aggregate_id AND older.aggregate_version<e.aggregate_version
+               AND older.aggregate_version<e.aggregate_version
                AND older.processed_at IS NULL
+               -- Compare the aggregate's structured identity, not its historical delimiter key.
+               -- This also preserves order across rows written before tuple IDs were introduced.
+               AND (
+                 (e.aggregate_type='service' AND older.payload->>'id'=e.payload->>'id')
+                 OR (e.aggregate_type='dependency'
+                   AND older.payload->>'dependentId'=e.payload->>'dependentId'
+                   AND older.payload->>'dependencyId'=e.payload->>'dependencyId')
+                 OR (e.aggregate_type='incident-service'
+                   AND older.payload->>'incidentId'=e.payload->>'incidentId'
+                   AND older.payload->>'serviceId'=e.payload->>'serviceId')
+               )
            )
-         ORDER BY e.id FOR UPDATE OF e SKIP LOCKED LIMIT 1`, [orgId]
+         ORDER BY e.id FOR UPDATE OF e SKIP LOCKED LIMIT 1`,
+        [orgId]
       );
       const row = selected.rows[0];
       if (!row) return undefined;
@@ -341,7 +374,7 @@ async function project(graph: GraphCatalogProjectionPort, event: ClaimedEvent): 
       name: requiredString(payload.name),
       serviceType: optionalString(payload.serviceType),
       owner: optionalString(payload.owner),
-        aggregateVersion: Number(event.aggregate_version),
+      aggregateVersion: Number(event.aggregate_version),
     });
   } else if (event.event_type === 'dependency.link') {
     const criticality = payload.criticality;
@@ -440,4 +473,12 @@ function optionalString(value: unknown): string | undefined {
   if (typeof value !== 'string')
     throw new Error('Invalid optional string in graph catalog outbox payload');
   return value;
+}
+
+/**
+ * Encodes a tuple without delimiter ambiguity. JSON arrays preserve tuple
+ * boundaries, and base64url makes the result safe as a compact SQL key.
+ */
+function encodeAggregateTuple(...parts: string[]): string {
+  return `tuple-v1:${Buffer.from(JSON.stringify(parts), 'utf8').toString('base64url')}`;
 }

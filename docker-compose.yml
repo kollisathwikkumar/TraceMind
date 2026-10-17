@@ -16,7 +16,9 @@ services:
       retries: 10
     restart: unless-stopped
   falkordb:
-    image: falkordb/falkordb-server:latest
+    # Pin the graph engine used by the real integration suite. Avoid the moving
+    # latest tag so local and CI behavior remains reproducible.
+    image: falkordb/falkordb-server:v4.22.1
     environment:
       REDIS_ARGS: "--appendonly yes"
     ports:

@@ -19,6 +19,29 @@ describe('FalkorDBStore', () => {
     expect(graph.roQuery).toHaveBeenCalledWith('MATCH (n) RETURN count(n) AS health');
   });
 
+  it('initializes a new graph key when FalkorDB rejects RO_QUERY on an empty key', async () => {
+    const graph = createGraph();
+    graph.roQuery
+      .mockRejectedValueOnce(new Error('ERR Invalid graph operation on empty key'))
+      .mockResolvedValueOnce({ headers: [], data: [] });
+    const store = new FalkorDBStore(graph);
+
+    await expect(store.checkHealth()).resolves.toBeUndefined();
+    expect(graph.query).toHaveBeenCalledWith('RETURN 1 AS health');
+    expect(graph.roQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not hide non-empty-key FalkorDB errors during readiness checks', async () => {
+    const graph = createGraph();
+    graph.roQuery.mockRejectedValue(
+      new Error('READONLY You cannot write against a read only replica')
+    );
+    const store = new FalkorDBStore(graph);
+
+    await expect(store.checkHealth()).rejects.toThrow('read only replica');
+    expect(graph.query).not.toHaveBeenCalled();
+  });
+
   it('upserts organization-scoped service nodes with bound parameters', async () => {
     const graph = createGraph();
     const store = new FalkorDBStore(graph);
