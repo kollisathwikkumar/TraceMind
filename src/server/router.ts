@@ -318,7 +318,7 @@ export function createRouter(routerConfig: RouterConfig) {
         });
         return;
       }
-      if (!identity.roles.includes('admin') && !identity.scopes.includes(requiredScope)) {
+      if (!hasRequiredScope(identity, requiredScope, path, method)) {
         sendJson(res, 403, {
           error: { code: 'insufficient_scope', message: `Required permission: ${requiredScope}` },
         });
@@ -745,6 +745,33 @@ function requiredScopeFor(path: string, method: string): string | undefined {
     return method === 'GET' ? 'knowledge:read' : 'knowledge:write';
   }
   return undefined;
+}
+
+/**
+ * A valid Auth0 organization claim proves that Auth0 has admitted the caller
+ * to one of this service's configured tenants.  Auth0 does not put API RBAC
+ * permissions in a newly-created member's first access token unless a role is
+ * assigned separately.  Permit that member to initialize the dashboard's
+ * read-only overview while retaining explicit permissions for every mutation,
+ * remediation action, settings operation, and model invocation.
+ */
+const DASHBOARD_BOOTSTRAP_READS = new Set([
+  'GET /api/v1/incidents',
+  'GET /api/v1/knowledge/stats',
+  'GET /api/v1/knowledge/services',
+]);
+
+function hasRequiredScope(
+  identity: Extract<RequestIdentity, { kind: 'auth0' }>,
+  requiredScope: string,
+  path: string,
+  method: string
+): boolean {
+  return (
+    identity.roles.includes('admin') ||
+    identity.scopes.includes(requiredScope) ||
+    DASHBOARD_BOOTSTRAP_READS.has(`${method} ${path}`)
+  );
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
