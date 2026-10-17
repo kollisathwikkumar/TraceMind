@@ -388,6 +388,56 @@ describe('incident API', () => {
     ).toBe(403);
   });
 
+  it('lets a newly admitted Auth0 organization member initialize the dashboard before RBAC assignment', async () => {
+    const tenantRetriever = {
+      close: () => {},
+      getDocumentCountsByType: async () => ({
+        runbook: 0,
+        postmortem: 0,
+        architecture: 0,
+        'known-issue': 0,
+      }),
+      getAllDocuments: async () => [],
+    } as unknown as IKnowledgeRetriever;
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      retriever: tenantRetriever,
+      retrieverForTenant: async (tenantId) => {
+        expect(tenantId).toBe('org-new');
+        return tenantRetriever;
+      },
+      auth0OrgIds: ['org-new'],
+      verifyAuth0Token: async (token) =>
+        token === 'new-member'
+          ? { sub: 'google-oauth2|new-member', organizationId: 'org-new', scopes: [], roles: [] }
+          : undefined,
+    });
+    const auth = { Authorization: 'Bearer new-member', 'Content-Type': 'application/json' };
+
+    expect((await fetch(`${base}/api/v1/knowledge/stats`, { headers: auth })).status).toBe(200);
+    expect((await fetch(`${base}/api/v1/knowledge/services`, { headers: auth })).status).toBe(200);
+    expect((await fetch(`${base}/api/v1/incidents`, { headers: auth })).status).toBe(200);
+
+    const mutation = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ title: 'must require incidents:write', severity: 'SEV-3' }),
+    });
+    expect(mutation.status).toBe(403);
+    expect(await mutation.json()).toMatchObject({ error: { code: 'insufficient_scope' } });
+
+    for (const path of [
+      '/api/v1/incidents/not-authorized',
+      '/api/v1/incidents/not-authorized/events',
+      '/api/v1/knowledge/documents',
+      '/api/v1/knowledge/documents/not-authorized',
+      '/api/v1/knowledge/sources',
+    ]) {
+      const response = await fetch(`${base}${path}`, { headers: auth });
+      expect(response.status, path).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: 'insufficient_scope' } });
+    }
+  });
+
   it('isolates incidents, remediation proposals, and evaluations by Auth0 organization', async () => {
     const base = await startApi(DEFAULT_CONFIG, undefined, {
       auth0OrgIds: ['org-a', 'org-b'],

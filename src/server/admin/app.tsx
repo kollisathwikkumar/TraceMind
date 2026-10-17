@@ -14,6 +14,7 @@ import { Remediations } from './components/Remediations';
 import { EvaluationAnalyticsPage } from './components/EvaluationAnalytics';
 import { Settings } from './components/Settings';
 import {
+  DASHBOARD_AUTHORIZATION_SCOPE,
   authReturnToWithoutInvitation,
   organizationLoginAuthorizationParams,
   safeAuthReturnTarget,
@@ -224,7 +225,11 @@ function AuthenticatedApp({
   if (!isAuthenticated) return <Auth0LoginScreen organizationId={organizationId} />;
   const api = new AdminApi(async () => {
     const token = await getAccessTokenSilently({
-      authorizationParams: { audience: config.audience, organization: organizationId },
+      authorizationParams: {
+        audience: config.audience,
+        organization: organizationId,
+        scope: DASHBOARD_AUTHORIZATION_SCOPE,
+      },
     });
     if (!token) throw new Error('No access token was returned for the TraceMind API');
     return token;
@@ -345,7 +350,7 @@ function ConfiguredAuthApp({
           redirect_uri: `${window.location.origin}/admin`,
           audience: config.audience,
           organization: organizationId,
-          scope: 'openid profile email',
+          scope: DASHBOARD_AUTHORIZATION_SCOPE,
         },
       }),
     [config, organizationId]

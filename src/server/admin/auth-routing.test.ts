@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DASHBOARD_AUTHORIZATION_SCOPE,
   authReturnToWithoutInvitation,
   organizationLoginAuthorizationParams,
   safeAuthReturnTarget,
@@ -31,6 +32,7 @@ describe('organizationLoginAuthorizationParams', () => {
     expect(forwardedAuthorizationParams).toEqual({
       organization: 'org_tracemind',
       invitation: 'invite-token',
+      scope: DASHBOARD_AUTHORIZATION_SCOPE,
     });
   });
 
@@ -51,8 +53,27 @@ describe('organizationLoginAuthorizationParams', () => {
       organizationLoginAuthorizationParams('org_tracemind', '?organization=org_other')
     ).toBeNull();
     expect(organizationLoginAuthorizationParams('org_tracemind', '?campaign=invite-token')).toEqual(
-      { organization: 'org_tracemind' }
+      {
+        organization: 'org_tracemind',
+        scope: DASHBOARD_AUTHORIZATION_SCOPE,
+      }
     );
+  });
+
+  it('requests the read permissions the initial dashboard needs without requesting write access', () => {
+    const authorizationParams = organizationLoginAuthorizationParams('org_tracemind', '');
+
+    expect(authorizationParams?.scope.split(' ')).toEqual([
+      'openid',
+      'profile',
+      'email',
+      'incidents:read',
+      'knowledge:read',
+      'graph:read',
+      'remediations:read',
+      'evaluations:read',
+    ]);
+    expect(authorizationParams?.scope).not.toContain(':write');
   });
 });
 
