@@ -22,6 +22,7 @@ interface AuthConfig {
   domain: string;
   clientId: string;
   audience: string;
+  organizations?: string[];
 }
 
 function parseHash(): { page: string; id?: string } {
@@ -181,7 +182,13 @@ function RemoteAuthRequiredScreen() {
   );
 }
 
-function AuthenticatedApp({ config }: { config: AuthConfig }) {
+function AuthenticatedApp({
+  config,
+  organizationId,
+}: {
+  config: AuthConfig;
+  organizationId: string;
+}) {
   const { isLoading, isAuthenticated, getAccessTokenSilently, logout, error } = useAuth0();
   const [route, setRoute] = useState(parseHash);
   const handleHashChange = useCallback(() => setRoute(parseHash()), []);
@@ -194,7 +201,7 @@ function AuthenticatedApp({ config }: { config: AuthConfig }) {
   if (!isAuthenticated) return <Auth0LoginScreen />;
   const api = new AdminApi(async () => {
     const token = await getAccessTokenSilently({
-      authorizationParams: { audience: config.audience },
+      authorizationParams: { audience: config.audience, organization: organizationId },
     });
     if (!token) throw new Error('No access token was returned for the TraceMind API');
     return token;
@@ -245,10 +252,67 @@ export function App() {
     );
   }
 
-  return <ConfiguredAuthApp config={config} />;
+  return <AuthOrganizationGate config={config} />;
 }
 
-function ConfiguredAuthApp({ config }: { config: AuthConfig }) {
+function AuthOrganizationGate({ config }: { config: AuthConfig }) {
+  const organizations = [...new Set(config.organizations || [])].filter(Boolean);
+  const [selectedOrganization, setSelectedOrganization] = useState(
+    organizations.length === 1 ? organizations[0] : ''
+  );
+
+  if (organizations.length === 0) {
+    return (
+      <div className="error-banner">
+        Auth0 is enabled, but no organization is configured. Set TRACEMIND_ORG_ID or
+        TRACEMIND_ORG_IDS to the Auth0 organization ID(s).
+      </div>
+    );
+  }
+
+  if (organizations.length > 1 && !organizations.includes(selectedOrganization)) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <h1 className="login-title">Choose your organization</h1>
+          <p className="login-subtitle">Sign in to the TraceMind organization you belong to.</p>
+          <label className="auth-login-options" htmlFor="auth0-organization">
+            Organization
+          </label>
+          <select
+            id="auth0-organization"
+            className="auth-organization-select"
+            value={selectedOrganization}
+            onChange={(event) => setSelectedOrganization(event.target.value)}
+          >
+            <option value="">Select an organization</option>
+            {organizations.map((organization) => (
+              <option key={organization} value={organization}>
+                {organization}
+              </option>
+            ))}
+          </select>
+          <p className="auth-login-options">
+            Auth0 verifies organization membership; API access remains scoped to the selected
+            organization.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ConfiguredAuthApp config={config} organizationId={selectedOrganization || organizations[0]} />
+  );
+}
+
+function ConfiguredAuthApp({
+  config,
+  organizationId,
+}: {
+  config: AuthConfig;
+  organizationId: string;
+}) {
   const client = useMemo(
     () =>
       new RedirectFirstAuth0Client({
@@ -257,10 +321,11 @@ function ConfiguredAuthApp({ config }: { config: AuthConfig }) {
         authorizationParams: {
           redirect_uri: `${window.location.origin}/admin`,
           audience: config.audience,
+          organization: organizationId,
           scope: 'openid profile email',
         },
       }),
-    [config]
+    [config, organizationId]
   );
   return (
     <Auth0Provider
@@ -276,7 +341,7 @@ function ConfiguredAuthApp({ config }: { config: AuthConfig }) {
         }
       }}
     >
-      <AuthenticatedApp config={config} />
+      <AuthenticatedApp config={config} organizationId={organizationId} />
     </Auth0Provider>
   );
 }

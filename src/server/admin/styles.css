@@ -2060,6 +2060,15 @@ textarea {
   margin: 0;
   text-align: center;
 }
+.auth-organization-select {
+  width: 100%;
+  margin: 12px 0;
+  padding: 11px;
+  border: 1px solid #dce6f3;
+  background: #fbfdff;
+  color: #334155;
+  font-size: 12px;
+}
 .settings-card {
   max-width: 760px;
   padding: 24px;

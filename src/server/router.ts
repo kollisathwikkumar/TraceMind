@@ -274,6 +274,11 @@ export function createRouter(routerConfig: RouterConfig) {
               domain: auth0.domain,
               clientId: auth0.clientId,
               audience: auth0.audience,
+              // `default` is a TraceMind storage fallback, not an Auth0
+              // organization ID and must never be sent as the OAuth parameter.
+              organizations: [...auth0OrgIds].filter(
+                (organizationId) => organizationId !== 'default'
+              ),
             }
           : { enabled: false, localAccess: isLocalBrowserRequest(req) },
       });
