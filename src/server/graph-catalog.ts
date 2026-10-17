@@ -106,13 +106,6 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
         version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await grantRuntimeTenantTables(client, runtimeRole, [
-      'graph_catalog_schema_migrations',
-      'graph_catalog_services',
-      'graph_catalog_dependencies',
-      'graph_catalog_incident_services',
-      'graph_catalog_outbox',
-    ]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS graph_catalog_services (
         org_id TEXT NOT NULL,
@@ -184,6 +177,15 @@ export async function migrateGraphCatalog(pool: Pool, runtimeRole?: string): Pro
     await client.query(
       'ALTER TABLE graph_catalog_outbox ADD COLUMN IF NOT EXISTS lease_token TEXT'
     );
+    // Grant after table creation: PostgreSQL rejects GRANT on any relation that
+    // does not exist yet, which otherwise aborts a fresh production bootstrap.
+    await grantRuntimeTenantTables(client, runtimeRole, [
+      'graph_catalog_schema_migrations',
+      'graph_catalog_services',
+      'graph_catalog_dependencies',
+      'graph_catalog_incident_services',
+      'graph_catalog_outbox',
+    ]);
     await client.query(
       'INSERT INTO graph_catalog_schema_migrations(version) VALUES(1) ON CONFLICT(version) DO NOTHING'
     );
