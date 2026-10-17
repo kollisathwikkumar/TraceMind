@@ -149,6 +149,7 @@ export function Dashboard({ api }: { api: AdminApi }) {
         {modelCheck && (
           <div className="notice" role="status">
             Connected to {modelCheck.provider} · {modelCheck.model}
+            {modelCheck.usedFallback ? ' · fallback provider used' : ''}
             <p>{modelCheck.response}</p>
           </div>
         )}

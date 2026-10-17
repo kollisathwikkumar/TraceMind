@@ -18,6 +18,7 @@ export interface LLMValidationResult {
   model: string;
   response: string;
   checkedAt: string;
+  usedFallback?: boolean;
 }
 
 export interface Incident {
@@ -138,14 +139,14 @@ export interface EvaluationAnalytics {
 }
 
 export class AdminApi {
-  constructor(private credential?: string | (() => Promise<string>)) {}
+  constructor(private credential?: string | ((scope?: string) => Promise<string>)) {}
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token =
       typeof this.credential === 'string'
         ? this.credential
         : typeof this.credential === 'function'
-          ? await this.credential()
+          ? await this.credential(path === '/api/v1/llm/validate' ? 'llm:validate' : undefined)
           : undefined;
     const res = await fetch(path, {
       method,
