@@ -12,7 +12,16 @@ RUN npm run build && npm prune --omit=dev
 # This is intentionally a single free Render web service for a disposable
 # staging/demo graph. The graph is bound to loopback and reconstructed from
 # PostgreSQL at startup; it is not a remote TLS endpoint or a durable graph.
-FROM falkordb/falkordb-server@sha256:2e99eb1cfa3309ce338beebe24b5e9f44f9eb8ead6d6ef63dcaca436afbbaeec
+FROM falkordb/falkordb-server@sha256:2e99eb1cfa3309ce338beebe24b5e9f44f9eb8ead6d6ef63dcaca436afbbaeec AS graph-runtime
+
+# Do not inherit FalkorDB's EXPOSE 6379 metadata into the web-service image.
+# Render should detect only the HTTP app port, while Redis stays loopback-only.
+FROM scratch
+
+# Copy the pinned FalkorDB runtime filesystem without inheriting its image
+# configuration, in particular its Redis EXPOSE 6379 metadata. The root
+# filesystem keeps the exact compatible libraries for Redis and the module.
+COPY --from=graph-runtime / /
 
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
 COPY --from=build /app/dist /app/dist
@@ -20,6 +29,17 @@ COPY --from=build /app/src/server/admin-dist /app/src/server/admin-dist
 COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/package.json /app/package.json
 COPY scripts/render-staging-entrypoint.sh /app/render-staging-entrypoint.sh
+
+ENV FALKORDB_BIN_PATH=/var/lib/falkordb/bin \
+    FALKORDB_DATA_PATH=/var/lib/falkordb/data \
+    FALKORDB_HOME=/var/lib/falkordb \
+    FALKORDB_IMPORT_PATH=/var/lib/falkordb/import \
+    FALKORDB_TLS_PATH=/var/lib/falkordb/tls \
+    TLS=0 \
+    HOME=/root \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+WORKDIR /app
 
 ENV BROWSER=0 \
     FALKORDB_ARGS="THREAD_COUNT 1"
