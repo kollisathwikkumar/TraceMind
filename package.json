@@ -1,6 +1,6 @@
 {
   "name": "tracemind",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "TraceMind incident intelligence: graph evidence, incident memory, and controlled remediation",
   "type": "module",
   "main": "dist/cli.js",
