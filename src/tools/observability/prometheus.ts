@@ -27,7 +27,7 @@ export function isPrometheusConfigured(): boolean {
   return !!(config?.baseUrl || process.env.PROMETHEUS_URL);
 }
 
-async function promFetch<T>(path: string): Promise<T> {
+async function promFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}${path}`;
 
@@ -40,7 +40,7 @@ async function promFetch<T>(path: string): Promise<T> {
     headers['Authorization'] = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
   }
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal });
 
   if (!response.ok) {
     const error = await response.text();
@@ -113,13 +113,17 @@ export interface PrometheusTargetsResult {
 /**
  * Query Prometheus for instant data (single point in time)
  */
-export async function instantQuery(query: string, time?: Date): Promise<PrometheusInstantResult> {
+export async function instantQuery(
+  query: string,
+  time?: Date,
+  signal?: AbortSignal
+): Promise<PrometheusInstantResult> {
   const params = new URLSearchParams({ query });
   if (time) {
     params.set('time', (time.getTime() / 1000).toString());
   }
 
-  return promFetch<PrometheusInstantResult>(`/api/v1/query?${params.toString()}`);
+  return promFetch<PrometheusInstantResult>(`/api/v1/query?${params.toString()}`, signal);
 }
 
 /**
@@ -129,7 +133,8 @@ export async function rangeQuery(
   query: string,
   start: Date,
   end: Date,
-  step: string = '15s'
+  step: string = '15s',
+  signal?: AbortSignal
 ): Promise<PrometheusInstantResult> {
   const params = new URLSearchParams({
     query,
@@ -138,20 +143,20 @@ export async function rangeQuery(
     step,
   });
 
-  return promFetch<PrometheusInstantResult>(`/api/v1/query_range?${params.toString()}`);
+  return promFetch<PrometheusInstantResult>(`/api/v1/query_range?${params.toString()}`, signal);
 }
 
 /**
  * Get all active alerts from Prometheus Alertmanager
  */
-export async function getAlerts(): Promise<PrometheusAlertGroup[]> {
-  return promFetch<PrometheusAlertGroup[]>('/api/v1/rules?type=alert');
+export async function getAlerts(signal?: AbortSignal): Promise<PrometheusAlertGroup[]> {
+  return promFetch<PrometheusAlertGroup[]>('/api/v1/rules?type=alert', signal);
 }
 
 /**
  * Get firing alerts only
  */
-export async function getFiringAlerts(): Promise<
+export async function getFiringAlerts(signal?: AbortSignal): Promise<
   Array<{
     alertname: string;
     instance?: string;
@@ -163,7 +168,7 @@ export async function getFiringAlerts(): Promise<
     activeAt: string;
   }>
 > {
-  const groups = await getAlerts();
+  const groups = await getAlerts(signal);
   const firingAlerts: Array<{
     alertname: string;
     instance?: string;
@@ -200,14 +205,14 @@ export async function getFiringAlerts(): Promise<
 /**
  * Get scrape targets and their health
  */
-export async function getTargets(): Promise<PrometheusTargetsResult> {
-  return promFetch<PrometheusTargetsResult>('/api/v1/targets');
+export async function getTargets(signal?: AbortSignal): Promise<PrometheusTargetsResult> {
+  return promFetch<PrometheusTargetsResult>('/api/v1/targets', signal);
 }
 
 /**
  * Get target health summary
  */
-export async function getTargetHealth(): Promise<{
+export async function getTargetHealth(signal?: AbortSignal): Promise<{
   healthy: number;
   unhealthy: number;
   targets: Array<{
@@ -218,7 +223,7 @@ export async function getTargetHealth(): Promise<{
     lastScrape: string;
   }>;
 }> {
-  const { activeTargets } = await getTargets();
+  const { activeTargets } = await getTargets(signal);
 
   const healthy = activeTargets.filter((t) => t.health === 'up').length;
   const unhealthy = activeTargets.filter((t) => t.health !== 'up').length;
@@ -312,15 +317,15 @@ export const COMMON_QUERIES = {
 /**
  * Quick health check - returns key metrics for investigation
  */
-export async function getQuickHealthCheck(): Promise<{
+export async function getQuickHealthCheck(signal?: AbortSignal): Promise<{
   alertCount: number;
   targetHealth: { healthy: number; unhealthy: number };
   topCpu?: Array<{ instance: string; value: number }>;
   topMemory?: Array<{ instance: string; value: number }>;
 }> {
   const [alerts, targetHealth] = await Promise.all([
-    getFiringAlerts().catch(() => []),
-    getTargetHealth().catch(() => ({ healthy: 0, unhealthy: 0, targets: [] })),
+    getFiringAlerts(signal).catch(() => []),
+    getTargetHealth(signal).catch(() => ({ healthy: 0, unhealthy: 0, targets: [] })),
   ]);
 
   // Try to get CPU and memory metrics
@@ -328,7 +333,7 @@ export async function getQuickHealthCheck(): Promise<{
   let topMemory: Array<{ instance: string; value: number }> = [];
 
   try {
-    const cpuResult = await instantQuery(COMMON_QUERIES.cpuUsageByNode);
+    const cpuResult = await instantQuery(COMMON_QUERIES.cpuUsageByNode, undefined, signal);
     topCpu = cpuResult.result
       .map((r) => ({
         instance: r.metric.instance || 'unknown',
@@ -341,7 +346,7 @@ export async function getQuickHealthCheck(): Promise<{
   }
 
   try {
-    const memResult = await instantQuery(COMMON_QUERIES.memoryUsageByNode);
+    const memResult = await instantQuery(COMMON_QUERIES.memoryUsageByNode, undefined, signal);
     topMemory = memResult.result
       .map((r) => ({
         instance: r.metric.instance || 'unknown',

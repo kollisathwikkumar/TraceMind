@@ -12,6 +12,7 @@ export interface SearchOptions {
   serviceFilter?: string[];
   limit?: number;
   rerank?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface IKnowledgeRetriever {

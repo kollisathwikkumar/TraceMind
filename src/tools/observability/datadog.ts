@@ -93,7 +93,8 @@ export interface MetricQueryResult {
 export async function queryMetrics(
   query: string,
   fromSeconds: number = 3600,
-  toSeconds: number = 0
+  toSeconds: number = 0,
+  signal?: AbortSignal
 ): Promise<MetricQueryResult | null> {
   const config = await getDatadogConfig();
   if (!config) {
@@ -116,7 +117,7 @@ export async function queryMetrics(
     from_date: number;
     to_date: number;
     query: string;
-  }>(config, `/api/v1/query?${params}`);
+  }>(config, `/api/v1/query?${params}`, { signal });
 
   return {
     status: result.status,
@@ -180,6 +181,7 @@ export async function searchLogs(
     limit?: number;
     sort?: 'asc' | 'desc';
     indexes?: string[];
+    signal?: AbortSignal;
   } = {}
 ): Promise<LogSearchResult | null> {
   const config = await getDatadogConfig();
@@ -224,6 +226,7 @@ export async function searchLogs(
   }>(config, '/api/v2/logs/events/search', {
     method: 'POST',
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   return {
@@ -271,6 +274,7 @@ export async function searchTraces(
     to?: number;
     limit?: number;
     service?: string;
+    signal?: AbortSignal;
   } = {}
 ): Promise<TraceSearchResult | null> {
   const config = await getDatadogConfig();
@@ -305,7 +309,7 @@ export async function searchTraces(
           meta?: Record<string, string>;
         };
       }>;
-    }>(config, `/api/v2/spans/events/search?${params}`);
+    }>(config, `/api/v2/spans/events/search?${params}`, { signal: options.signal });
 
     return {
       spans: (result.data || []).map((span) => ({
@@ -351,6 +355,7 @@ export async function listMonitors(
     groupStates?: string[];
     name?: string;
     tags?: string[];
+    signal?: AbortSignal;
   } = {}
 ): Promise<DatadogMonitor[]> {
   const config = await getDatadogConfig();
@@ -382,7 +387,7 @@ export async function listMonitors(
       created: string;
       modified: string;
     }>
-  >(config, `/api/v1/monitor?${params}`);
+  >(config, `/api/v1/monitor?${params}`, { signal: options.signal });
 
   return (result || []).map((m) => ({
     id: m.id,
@@ -401,8 +406,8 @@ export async function listMonitors(
 /**
  * Get triggered monitors
  */
-export async function getTriggeredMonitors(): Promise<DatadogMonitor[]> {
-  return listMonitors({ groupStates: ['Alert', 'Warn', 'No Data'] });
+export async function getTriggeredMonitors(signal?: AbortSignal): Promise<DatadogMonitor[]> {
+  return listMonitors({ groupStates: ['Alert', 'Warn', 'No Data'], signal });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -431,6 +436,7 @@ export async function getEvents(
     priority?: 'normal' | 'low';
     tags?: string[];
     sources?: string[];
+    signal?: AbortSignal;
   } = {}
 ): Promise<DatadogEvent[]> {
   const config = await getDatadogConfig();
@@ -466,7 +472,7 @@ export async function getEvents(
       alert_type?: string;
       source?: string;
     }>;
-  }>(config, `/api/v1/events?${params}`);
+  }>(config, `/api/v1/events?${params}`, { signal: options.signal });
 
   return (result.events || []).map((e) => ({
     id: e.id,
@@ -497,7 +503,7 @@ export interface DatadogService {
 /**
  * List services from service catalog
  */
-export async function listServices(): Promise<DatadogService[]> {
+export async function listServices(signal?: AbortSignal): Promise<DatadogService[]> {
   const config = await getDatadogConfig();
   if (!config) {
     return [];
@@ -516,7 +522,7 @@ export async function listServices(): Promise<DatadogService[]> {
           };
         };
       }>;
-    }>(config, '/api/v2/services/definitions');
+    }>(config, '/api/v2/services/definitions', { signal });
 
     return (result.data || []).map((s) => ({
       name: s.attributes.schema['dd-service'],
@@ -545,7 +551,7 @@ export async function isDatadogConfigured(): Promise<boolean> {
 /**
  * Get a summary of Datadog status
  */
-export async function getDatadogSummary(): Promise<{
+export async function getDatadogSummary(signal?: AbortSignal): Promise<{
   configured: boolean;
   triggeredMonitors: number;
   recentEvents: number;
@@ -557,11 +563,18 @@ export async function getDatadogSummary(): Promise<{
   }
 
   try {
-    const [monitors, events, services] = await Promise.all([
-      getTriggeredMonitors(),
-      getEvents({ start: Math.floor(Date.now() / 1000) - 3600 }),
-      listServices(),
+    const [monitorsResult, eventsResult, servicesResult] = await Promise.allSettled([
+      getTriggeredMonitors(signal),
+      getEvents({ start: Math.floor(Date.now() / 1000) - 3600, signal }),
+      listServices(signal),
     ]);
+
+    // Promise.allSettled ensures every sibling request reaches its own settled
+    // state before the hosted tracker releases this aggregate operation.
+    if (signal?.aborted) throw signal.reason ?? new Error('Datadog request cancelled');
+    const monitors = monitorsResult.status === 'fulfilled' ? monitorsResult.value : [];
+    const events = eventsResult.status === 'fulfilled' ? eventsResult.value : [];
+    const services = servicesResult.status === 'fulfilled' ? servicesResult.value : [];
 
     return {
       configured: true,
@@ -569,7 +582,8 @@ export async function getDatadogSummary(): Promise<{
       recentEvents: events.length,
       services: services.length,
     };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return {
       configured: true,
       triggeredMonitors: 0,

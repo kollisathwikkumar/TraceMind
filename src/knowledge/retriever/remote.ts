@@ -23,10 +23,15 @@ export class RemoteKnowledgeRetriever implements IKnowledgeRetriever {
     this.apiKey = apiKey;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
-      'Authorization': `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
     };
 
@@ -34,6 +39,7 @@ export class RemoteKnowledgeRetriever implements IKnowledgeRetriever {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
+      signal,
     });
 
     if (!res.ok) {
@@ -66,10 +72,16 @@ export class RemoteKnowledgeRetriever implements IKnowledgeRetriever {
   }
 
   async search(query: string, options: SearchOptions = {}): Promise<RetrievedKnowledge> {
-    return this.request<RetrievedKnowledge>('POST', '/api/v1/knowledge/search', {
-      query,
-      ...options,
-    });
+    const { signal, ...requestOptions } = options;
+    return this.request<RetrievedKnowledge>(
+      'POST',
+      '/api/v1/knowledge/search',
+      {
+        query,
+        ...requestOptions,
+      },
+      signal
+    );
   }
 
   async getDocumentCount(): Promise<number> {

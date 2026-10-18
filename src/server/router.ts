@@ -7,13 +7,19 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import { randomUUID } from 'crypto';
 import type { IKnowledgeRetriever } from '../knowledge/retriever/types';
 import type { KnowledgeDocument, KnowledgeType } from '../knowledge/types';
 import type { Config } from '../utils/config';
 import { LLMValidationError, validateLLMProvider } from './llm-validation';
 import type { MCPServer } from '../mcp/server';
 import type { FalkorDBStore } from '../knowledge/store/falkordb-store';
-import type { IncidentRepository, IncidentSeverity, IncidentStatus } from './incidents/store';
+import type {
+  Incident,
+  IncidentRepository,
+  IncidentSeverity,
+  IncidentStatus,
+} from './incidents/store';
 import {
   type WorkflowRepository,
   type EvaluationCaseInput,
@@ -25,6 +31,7 @@ import type { Auth0Config, Auth0Identity } from './auth0';
 import type { ProviderKeyStorePort } from './provider-keys';
 import type { GraphProjectionEvent } from './postgres-stores';
 import type { PostgresGraphCatalogStore } from './graph-catalog';
+import type { InvestigationResult } from '../agent/investigation-orchestrator';
 import {
   authenticateRequest,
   readBody,
@@ -62,6 +69,15 @@ export interface RouterConfig {
     | 'checkHealth'
   >;
   incidentStore?: IncidentRepository;
+  /** Hosted investigator returns a proposal only; it must not execute remediation. */
+  investigateIncident?: (input: {
+    incident: Incident;
+    tenantId: string;
+    additionalContext?: string;
+    signal?: AbortSignal;
+    traceId?: string;
+  }) => Promise<InvestigationResult>;
+  getInvestigationHistory?: (incidentId: string, tenantId: string) => Promise<unknown[]>;
   workflowStore?: WorkflowRepository;
   auth0Config?: Auth0Config;
   verifyAuth0Token?: (token: string) => Promise<Auth0Identity | undefined>;
@@ -72,6 +88,10 @@ export interface RouterConfig {
   remediationExecutorRequired?: boolean;
   /** Immutable source revision supplied by the deployment platform. */
   buildSha?: string;
+  /** Request-scoped investigation deadline. */
+  investigationTimeoutMs?: number;
+  /** Aborted during shutdown to stop request-scoped investigations. */
+  shutdownSignal?: AbortSignal;
   /** Maximum time a readiness dependency may take before it is unhealthy. */
   healthCheckTimeoutMs?: number;
   /** Override the provider request in route-level tests. */
@@ -524,6 +544,222 @@ export function createRouter(routerConfig: RouterConfig) {
         });
         return;
       }
+    }
+
+    if (
+      /^\/api\/v1\/incidents\/[^/]+\/investigations$/.test(path) &&
+      ['GET', 'POST'].includes(method)
+    ) {
+      if (!identity) {
+        sendJson(res, 401, {
+          error: { code: 'unauthorized', message: 'Invalid or missing API key' },
+        });
+        return;
+      }
+
+      let incidentId: string;
+      try {
+        incidentId = decodeURIComponent(path.split('/')[4] || '');
+      } catch {
+        sendJson(res, 400, {
+          error: { code: 'invalid_incident_id', message: 'Incident ID is malformed' },
+        });
+        return;
+      }
+
+      if (!incidentStore) {
+        sendJson(res, 503, {
+          error: { code: 'incidents_unavailable', message: 'Incident storage is not configured' },
+        });
+        return;
+      }
+      let incident;
+      try {
+        incident = await incidentStore.get(incidentId, tenantId);
+      } catch {
+        sendJson(res, 503, {
+          error: {
+            code: 'incident_store_unavailable',
+            message: 'Incident storage is temporarily unavailable',
+          },
+        });
+        return;
+      }
+      if (!incident) {
+        sendJson(res, 404, {
+          error: { code: 'incident_not_found', message: 'Incident was not found' },
+        });
+        return;
+      }
+
+      if (method === 'GET') {
+        if (!routerConfig.getInvestigationHistory) {
+          sendJson(res, 200, { data: [] });
+          return;
+        }
+        try {
+          sendJson(res, 200, {
+            data: await routerConfig.getInvestigationHistory(incidentId, tenantId),
+          });
+        } catch {
+          sendJson(res, 503, {
+            error: {
+              code: 'investigation_memory_unavailable',
+              message: 'Incident investigation history is temporarily unavailable',
+            },
+          });
+        }
+        return;
+      }
+
+      // Investigation currently uses process-level provider credentials, not
+      // credentials bound to the authenticated organization. Do not allow a
+      // write/inference under ambiguous multi-org configuration.
+      if (auth0OrgIds.size > 1) {
+        sendJson(res, 503, {
+          error: {
+            code: 'investigation_org_provider_binding_required',
+            message: 'Hosted investigation requires organization-bound provider credentials',
+          },
+        });
+        return;
+      }
+
+      if (!routerConfig.investigateIncident) {
+        sendJson(res, 503, {
+          error: {
+            code: 'investigation_unavailable',
+            message: 'AI investigation is not configured',
+          },
+        });
+        return;
+      }
+      const body = await readJsonBody(req, res);
+      if (!body) return;
+      const additionalContext = body.additionalContext;
+      if (
+        additionalContext !== undefined &&
+        (typeof additionalContext !== 'string' || additionalContext.length > 8_000)
+      ) {
+        sendJson(res, 400, {
+          error: {
+            code: 'invalid_investigation_context',
+            message: 'additionalContext must be a string of at most 8000 characters',
+          },
+        });
+        return;
+      }
+
+      const traceId = randomUUID();
+      const startedAt = performance.now();
+      const investigationController = new AbortController();
+      let deadlineExceeded = false;
+      const abortForShutdown = () =>
+        investigationController.abort(
+          Object.assign(new Error('Server is shutting down'), { code: 'server_shutdown' })
+        );
+      const onResponseClose = () => {
+        if (!res.writableEnded) {
+          investigationController.abort(
+            Object.assign(new Error('Investigation client disconnected'), {
+              code: 'caller_disconnected',
+            })
+          );
+        }
+      };
+      if (routerConfig.shutdownSignal?.aborted) abortForShutdown();
+      else routerConfig.shutdownSignal?.addEventListener('abort', abortForShutdown, { once: true });
+      res.once('close', onResponseClose);
+      const requestTimeoutMs = Math.max(
+        1_000,
+        Math.min(routerConfig.investigationTimeoutMs ?? 90_000, 180_000)
+      );
+      const deadlineTimer = setTimeout(() => {
+        deadlineExceeded = true;
+        investigationController.abort(
+          Object.assign(new Error('Investigation request deadline exceeded'), {
+            code: 'investigation_deadline',
+          })
+        );
+      }, requestTimeoutMs);
+      deadlineTimer.unref();
+      let outcome: 'completed' | 'failed' | 'cancelled' | 'deadline' = 'failed';
+      let pendingOperations = 0;
+      try {
+        const result = await routerConfig.investigateIncident({
+          incident,
+          tenantId,
+          additionalContext: additionalContext as string | undefined,
+          signal: investigationController.signal,
+          traceId,
+        });
+        if (investigationController.signal.aborted || res.destroyed || res.writableEnded) {
+          outcome = deadlineExceeded ? 'deadline' : 'cancelled';
+          return;
+        }
+        sendJson(res, 201, {
+          data: result,
+          meta: {
+            provenance: 'AI-generated investigation proposal; no remediation action was executed.',
+          },
+        });
+        outcome = 'completed';
+      } catch (caught) {
+        const error = caught as (Error & { code?: string; pendingOperations?: number }) | undefined;
+        pendingOperations = Number.isInteger(error?.pendingOperations)
+          ? error!.pendingOperations!
+          : 0;
+        if (
+          res.destroyed ||
+          res.writableEnded ||
+          investigationController.signal.reason?.code === 'caller_disconnected'
+        ) {
+          outcome = 'cancelled';
+          return;
+        }
+        if (
+          deadlineExceeded ||
+          investigationController.signal.reason?.code === 'investigation_deadline'
+        ) {
+          outcome = 'deadline';
+          sendJson(res, 504, {
+            error: {
+              code: 'investigation_deadline',
+              message: 'Investigation exceeded its time budget.',
+            },
+          });
+        } else if (investigationController.signal.reason?.code === 'server_shutdown') {
+          outcome = 'cancelled';
+          sendJson(res, 503, {
+            error: {
+              code: 'server_shutting_down',
+              message: 'Investigation was interrupted during server shutdown.',
+            },
+          });
+        } else {
+          sendJson(res, 502, {
+            error: {
+              code: 'investigation_failed',
+              message:
+                'AI investigation failed; verify the model provider and evidence sources, then retry.',
+            },
+          });
+        }
+      } finally {
+        clearTimeout(deadlineTimer);
+        res.off('close', onResponseClose);
+        routerConfig.shutdownSignal?.removeEventListener('abort', abortForShutdown);
+        console.info(
+          JSON.stringify({
+            event: 'investigation.request.finished',
+            traceId,
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            outcome,
+            ...(pendingOperations ? { pendingOperations } : {}),
+          })
+        );
+      }
+      return;
     }
 
     if (

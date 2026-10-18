@@ -54,7 +54,8 @@ function getCacheKey(text: string, model: string): string {
 /**
  * Generate embedding for a single text
  */
-export async function embedText(text: string): Promise<number[]> {
+export async function embedText(text: string, signal?: AbortSignal): Promise<number[]> {
+  if (signal?.aborted) throw signal.reason ?? new Error('Embedding request cancelled');
   const apiKey = getApiKey();
   const model = config?.model || DEFAULT_MODEL;
 
@@ -76,6 +77,7 @@ export async function embedText(text: string): Promise<number[]> {
       input: text,
       dimensions: config?.dimensions || DEFAULT_DIMENSIONS,
     }),
+    signal,
   });
 
   if (!response.ok) {

@@ -14,10 +14,25 @@ import {
   type TSchema,
 } from '@mariozechner/pi-ai';
 import type { Tool } from '../agent/types';
-import type { LLMClient, LLMResponse, ToolCall, StreamChunk } from '../agent/agent';
+import type {
+  LLMClient as AgentLLMClient,
+  LLMResponse,
+  ToolCall,
+  StreamChunk,
+} from '../agent/agent';
 
 // Re-export types for external use
-export type { LLMClient, LLMResponse, ToolCall, StreamChunk };
+export type { LLMResponse, ToolCall, StreamChunk };
+
+/** Agent client contract with optional request cancellation for hosted calls. */
+export interface LLMClient extends AgentLLMClient {
+  chat(
+    systemPrompt: string,
+    userPrompt: string,
+    tools?: Tool[],
+    options?: { signal?: AbortSignal }
+  ): Promise<LLMResponse>;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyModel = any;
@@ -113,7 +128,12 @@ class PiAIClient implements LLMClient {
     }
   }
 
-  async chat(systemPrompt: string, userPrompt: string, tools?: Tool[]): Promise<LLMResponse> {
+  async chat(
+    systemPrompt: string,
+    userPrompt: string,
+    tools?: Tool[],
+    options?: { signal?: AbortSignal }
+  ): Promise<LLMResponse> {
     // Convert tools to pi-ai format
     const piTools = tools?.map((t) => this.convertTool(t));
 
@@ -130,16 +150,26 @@ class PiAIClient implements LLMClient {
       tools: piTools,
     };
 
-    const controller = this.config.requestTimeoutMs ? new AbortController() : undefined;
-    const timeout = controller
-      ? setTimeout(() => controller.abort(), this.config.requestTimeoutMs)
+    const controller = new AbortController();
+    const callerSignal = options?.signal;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+    const timeout = this.config.requestTimeoutMs
+      ? setTimeout(
+          () =>
+            controller.abort(
+              Object.assign(new Error('LLM request timeout'), { code: 'llm_timeout' })
+            ),
+          this.config.requestTimeoutMs
+        )
       : undefined;
     try {
       // Make completion request
       const response = await complete(this.model, context, {
         maxTokens: this.config.maxTokens,
         temperature: this.config.temperature,
-        signal: controller?.signal,
+        signal: controller.signal,
         onPayload: this.config.extraBody
           ? (payload) => {
               if (payload && typeof payload === 'object') {
@@ -162,7 +192,11 @@ class PiAIClient implements LLMClient {
         `LLM API error (${this.config.provider}/${this.config.model}): ${errorMessage}`
       );
       if (error && typeof error === 'object') {
-        const candidate = error as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
+        const candidate = error as {
+          status?: unknown;
+          statusCode?: unknown;
+          response?: { status?: unknown };
+        };
         const status = [candidate.status, candidate.statusCode, candidate.response?.status].find(
           (value): value is number => typeof value === 'number' && value >= 100 && value <= 599
         );
@@ -171,6 +205,7 @@ class PiAIClient implements LLMClient {
       throw wrapped;
     } finally {
       if (timeout) clearTimeout(timeout);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
     }
   }
 
@@ -322,7 +357,12 @@ export class MockLLMClient implements LLMClient {
     this.responses.push(response);
   }
 
-  async chat(_systemPrompt: string, _userPrompt: string, _tools?: Tool[]): Promise<LLMResponse> {
+  async chat(
+    _systemPrompt: string,
+    _userPrompt: string,
+    _tools?: Tool[],
+    _options?: { signal?: AbortSignal }
+  ): Promise<LLMResponse> {
     if (this.callIndex >= this.responses.length) {
       return { content: 'No more mock responses', toolCalls: [] };
     }

@@ -58,18 +58,24 @@ export class HybridRetriever {
       typeFilter?: KnowledgeType[];
       serviceFilter?: string[];
       mode?: 'hybrid' | 'fts' | 'vector';
+      signal?: AbortSignal;
     } = {}
   ): Promise<RetrievedChunk[]> {
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new Error('Knowledge search cancelled');
     const topK = options.topK || 10;
     const mode = options.mode || (this.hasVectorSearch() ? 'hybrid' : 'fts');
 
     // FTS-only mode
     if (mode === 'fts' || !this.hasVectorSearch()) {
-      return this.ftsStore.search(query, {
+      const results = await this.ftsStore.search(query, {
         typeFilter: options.typeFilter,
         serviceFilter: options.serviceFilter,
         limit: topK,
       });
+      if (options.signal?.aborted)
+        throw options.signal.reason ?? new Error('Knowledge search cancelled');
+      return results;
     }
 
     // Vector-only mode
@@ -78,6 +84,7 @@ export class HybridRetriever {
         topK,
         typeFilter: options.typeFilter,
         serviceFilter: options.serviceFilter,
+        signal: options.signal,
       });
     }
 
@@ -92,8 +99,11 @@ export class HybridRetriever {
         topK: topK * 2,
         typeFilter: options.typeFilter,
         serviceFilter: options.serviceFilter,
+        signal: options.signal,
       }),
     ]);
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new Error('Knowledge search cancelled');
 
     // Apply Reciprocal Rank Fusion (RRF)
     return this.reciprocalRankFusion(ftsResults, vectorResults, topK);

@@ -10,6 +10,9 @@ export interface GraphRow {
   [key: string]: unknown;
 }
 
+/** Maximum server-side runtime for the variable-depth incident evidence query. */
+export const GRAPH_EVIDENCE_QUERY_TIMEOUT_MS = 5_000;
+
 export interface FalkorGraphPort {
   query<T = unknown>(
     query: string,
@@ -17,7 +20,7 @@ export interface FalkorGraphPort {
   ): Promise<{ headers?: string[]; data?: T[] }>;
   roQuery<T = unknown>(
     query: string,
-    options?: { params?: Record<string, unknown> }
+    options?: { params?: Record<string, unknown>; TIMEOUT?: number }
   ): Promise<{ headers?: string[]; data?: T[] }>;
 }
 
@@ -358,11 +361,16 @@ export class FalkorDBStore {
   async findIncidentEvidencePaths(
     orgId: string,
     incidentId: string,
-    maxDepth = 3
+    maxDepth = 3,
+    signal?: AbortSignal
   ): Promise<IncidentEvidencePath[]> {
+    if (signal?.aborted) throw signal.reason ?? new Error('Graph evidence lookup cancelled');
     if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 4) {
       throw new Error('Graph traversal depth must be an integer from 1 through 4');
     }
+    // FalkorDB 6.6 Graph.roQuery accepts QueryOptions with params and TIMEOUT.
+    // Its client API has no per-query AbortSignal, so keep caller-side work
+    // tracked until it settles and bound server execution independently.
     const result = await this.graph.roQuery<unknown[]>(
       `MATCH path=(current:Incident {org_id: $orgId, id: $incidentId})-[:AFFECTS]->(root:Service)-[:DEPENDS_ON*0..${maxDepth}]-(target:Service)<-[:AFFECTS]-(related:Incident {org_id: $orgId})
        WHERE related.id <> current.id AND ALL(n IN nodes(path) WHERE n.org_id = $orgId)
@@ -374,7 +382,7 @@ export class FalkorDBStore {
               [r IN relationships(path) | {from: startNode(r).id, to: endNode(r).id, relationship: type(r), criticality: r.criticality}] AS edges
        ORDER BY incidentTitle, incidentId
        LIMIT 50`,
-      { params: { orgId, incidentId } }
+      { params: { orgId, incidentId }, TIMEOUT: GRAPH_EVIDENCE_QUERY_TIMEOUT_MS }
     );
     return this.toRows(result).flatMap((row) => {
       if (typeof row.incidentId !== 'string') return [];

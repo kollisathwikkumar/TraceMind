@@ -332,7 +332,8 @@ function normalizeAwsCliResource(item: unknown, spec: AwsCliFallbackSpec): Recor
 async function runAwsCliFallback(
   serviceId: string,
   region: string,
-  limit: number
+  limit: number,
+  signal?: AbortSignal
 ): Promise<{
   source: 'aws_cli_fallback';
   command: string;
@@ -353,6 +354,7 @@ async function runAwsCliFallback(
   const { stdout } = await execFileAsync('aws', args, {
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,
+    signal,
   });
 
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
@@ -432,7 +434,7 @@ ${categoryList}
     },
     required: ['query'],
   },
-  async (args) => {
+  async (args, context) => {
     const defaultRegion = await getDefaultRegion();
     const region = (args.region as string | undefined) || defaultRegion;
     const accountName = args.account as string | undefined;
@@ -470,7 +472,10 @@ ${categoryList}
         accountName,
         region,
         limit,
+        signal: context?.signal,
       });
+
+      if (context?.signal?.aborted) throw new Error('AWS query cancelled');
 
       // Format output
       const output: Record<string, unknown> = {};
@@ -482,7 +487,12 @@ ${categoryList}
         if (result.error) {
           if (result.error.includes('Failed to import')) {
             try {
-              const fallbackResult = await runAwsCliFallback(serviceId, region, limit);
+              const fallbackResult = await runAwsCliFallback(
+                serviceId,
+                region,
+                limit,
+                context?.signal
+              );
               if (fallbackResult) {
                 output[serviceId] = {
                   count: fallbackResult.count,
@@ -874,16 +884,16 @@ export const cloudwatchAlarmsTool = defineTool(
       },
     },
   },
-  async (args) => {
+  async (args, context) => {
     try {
       const state = args.state as string;
       const region = args.region as string | undefined;
 
       let alarms;
       if (state === 'all' || !state) {
-        alarms = await getActiveAlarms(region);
+        alarms = await getActiveAlarms(region, context?.signal);
       } else {
-        const allAlarms = await getActiveAlarms(region);
+        const allAlarms = await getActiveAlarms(region, context?.signal);
         alarms = allAlarms.filter((a) => a.stateValue === state);
       }
 
@@ -929,7 +939,7 @@ export const cloudwatchLogsTool = defineTool(
     },
     required: ['log_group'],
   },
-  async (args) => {
+  async (args, context) => {
     try {
       const logGroup = args.log_group as string;
       const pattern = (args.filter_pattern as string) || 'ERROR';
@@ -939,7 +949,15 @@ export const cloudwatchLogsTool = defineTool(
       const endTime = new Date();
       const startTime = new Date(endTime.getTime() - minutesBack * 60 * 1000);
 
-      const events = await filterLogEvents(logGroup, pattern, startTime, endTime, 50, region);
+      const events = await filterLogEvents(
+        logGroup,
+        pattern,
+        startTime,
+        endTime,
+        50,
+        region,
+        context?.signal
+      );
       return {
         events: events.map((e) => ({
           timestamp: new Date(e.timestamp).toISOString(),
@@ -1251,7 +1269,7 @@ export const datadogTool = defineTool(
     },
     required: ['action'],
   },
-  async (args) => {
+  async (args, context) => {
     const action = args.action as string;
     const query = args.query as string | undefined;
     const service = args.service as string | undefined;
@@ -1270,12 +1288,12 @@ export const datadogTool = defineTool(
     try {
       switch (action) {
         case 'summary': {
-          const summary = await getDatadogSummary();
+          const summary = await getDatadogSummary(context?.signal);
           return summary || { error: 'Failed to get Datadog summary' };
         }
 
         case 'monitors': {
-          const monitors = await getTriggeredMonitors();
+          const monitors = await getTriggeredMonitors(context?.signal);
           return {
             triggeredMonitors: monitors.map((m) => ({
               id: m.id,
@@ -1298,6 +1316,7 @@ export const datadogTool = defineTool(
             from: from.toISOString(),
             to: now.toISOString(),
             limit,
+            signal: context?.signal,
           });
           return result || { error: 'Failed to search logs' };
         }
@@ -1306,7 +1325,7 @@ export const datadogTool = defineTool(
           if (!query) {
             return { error: 'Query is required for metrics (e.g., "avg:system.cpu.user{*}")' };
           }
-          const result = await queryMetrics(query, fromMinutes * 60, 0);
+          const result = await queryMetrics(query, fromMinutes * 60, 0, context?.signal);
           if (!result) {
             return { error: 'Failed to query metrics' };
           }
@@ -1326,6 +1345,7 @@ export const datadogTool = defineTool(
             from: Math.floor(Date.now() / 1000) - fromMinutes * 60,
             limit,
             service,
+            signal: context?.signal,
           });
           if (!result) {
             return { error: 'Failed to search traces' };
@@ -1345,6 +1365,7 @@ export const datadogTool = defineTool(
         case 'events': {
           const events = await getEvents({
             start: Math.floor(Date.now() / 1000) - fromMinutes * 60,
+            signal: context?.signal,
           });
           return {
             events: events.map((e) => ({
@@ -2131,7 +2152,7 @@ export const prometheusTool = defineTool(
     },
     required: ['action'],
   },
-  async (args) => {
+  async (args, context) => {
     const action = args.action as string;
 
     if (!isPrometheusConfigured()) {
@@ -2147,7 +2168,7 @@ export const prometheusTool = defineTool(
           if (!args.query) {
             return { error: 'Query is required for instant query' };
           }
-          const result = await instantQuery(args.query as string);
+          const result = await instantQuery(args.query as string, undefined, context?.signal);
           return {
             resultType: result.resultType,
             results: result.result.map((r) => ({
@@ -2168,7 +2189,7 @@ export const prometheusTool = defineTool(
           const end = new Date();
           const start = new Date(end.getTime() - fromMinutes * 60 * 1000);
 
-          const result = await rangeQuery(args.query as string, start, end, step);
+          const result = await rangeQuery(args.query as string, start, end, step, context?.signal);
           return {
             resultType: result.resultType,
             results: result.result.map((r) => ({
@@ -2184,7 +2205,7 @@ export const prometheusTool = defineTool(
         }
 
         case 'alerts': {
-          const alerts = await getFiringAlerts();
+          const alerts = await getFiringAlerts(context?.signal);
           return {
             firingAlerts: alerts.map((a) => ({
               name: a.alertname,
@@ -2200,7 +2221,7 @@ export const prometheusTool = defineTool(
         }
 
         case 'targets': {
-          const health = await getTargetHealth();
+          const health = await getTargetHealth(context?.signal);
           return {
             summary: {
               healthy: health.healthy,
@@ -2219,7 +2240,7 @@ export const prometheusTool = defineTool(
         }
 
         case 'health_check': {
-          const health = await getQuickHealthCheck();
+          const health = await getQuickHealthCheck(context?.signal);
           return {
             alertCount: health.alertCount,
             targets: health.targetHealth,
@@ -2259,7 +2280,7 @@ export const prometheusTool = defineTool(
             };
           }
 
-          const result = await instantQuery(query);
+          const result = await instantQuery(query, undefined, context?.signal);
           return {
             metric: metricKey,
             query,

@@ -20,7 +20,7 @@ import type {
   KnowledgeDocument,
   ApiSourceConfig,
 } from '../types';
-import type { IKnowledgeRetriever } from './types';
+import type { IKnowledgeRetriever, SearchOptions } from './types';
 export type { IKnowledgeRetriever } from './types';
 
 const DEFAULT_LIMIT = 20;
@@ -70,6 +70,7 @@ interface VectorStorePort {
       typeFilter?: KnowledgeType[];
       serviceFilter?: string[];
       minScore?: number;
+      signal?: AbortSignal;
     }
   ): Promise<import('../types').RetrievedChunk[]>;
   deleteDocument(documentId: string): MaybeAsync<void>;
@@ -219,16 +220,12 @@ export class KnowledgeRetriever {
   /**
    * Search for relevant knowledge
    */
-  async search(
-    query: string,
-    options: {
-      typeFilter?: KnowledgeType[];
-      serviceFilter?: string[];
-      limit?: number;
-      rerank?: boolean;
-    } = {}
-  ): Promise<RetrievedKnowledge> {
+  async search(query: string, options: SearchOptions = {}): Promise<RetrievedKnowledge> {
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new Error('Knowledge search cancelled');
     await this.ensureInitialized();
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new Error('Knowledge search cancelled');
 
     const trimmedQuery = query.trim();
     if (!trimmedQuery) {
@@ -249,6 +246,8 @@ export class KnowledgeRetriever {
       serviceFilter: options.serviceFilter,
       limit: fusionLimit,
     });
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new Error('Knowledge search cancelled');
 
     let allResults = ftsResults;
     if (rerank && this.vectorStore && this.vectorSearchEnabled) {
@@ -258,6 +257,7 @@ export class KnowledgeRetriever {
           typeFilter: options.typeFilter,
           serviceFilter: options.serviceFilter,
           minScore: 0.15,
+          signal: options.signal,
         });
 
         if (vectorResults.length > 0) {
@@ -267,6 +267,7 @@ export class KnowledgeRetriever {
           });
         }
       } catch (error) {
+        if (options.signal?.aborted) throw error;
         this.vectorSearchEnabled = false;
         console.warn('Vector search disabled for current process:', error);
       }

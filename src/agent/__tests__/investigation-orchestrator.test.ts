@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   InvestigationOrchestrator,
   createOrchestrator,
+  InvestigationAbortError,
+  OutstandingWorkTracker,
   type LLMClient,
   type ToolExecutor,
   type InvestigationEvent,
@@ -179,6 +181,110 @@ describe('InvestigationOrchestrator', () => {
     };
   });
 
+  describe('bounded investigation work', () => {
+    it('aborts an in-flight LLM call when the end-to-end deadline expires', async () => {
+      let providerSignal: AbortSignal | undefined;
+      const llm: LLMClient = {
+        complete: vi.fn((_prompt: string, options?: { signal?: AbortSignal }) => {
+          providerSignal = options?.signal;
+          return new Promise<string>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              'abort',
+              () => reject(new Error('provider aborted')),
+              { once: true }
+            );
+          });
+        }),
+      };
+      const tracker = new OutstandingWorkTracker(4);
+      const orchestrator = createOrchestrator(llm, mockToolExecutor, {
+        availableTools: [],
+        totalDeadlineMs: 25,
+        outstandingWorkTracker: tracker,
+      });
+
+      await expect(orchestrator.investigate('deadline test')).rejects.toMatchObject({
+        name: 'InvestigationAbortError',
+        code: 'deadline',
+      });
+      expect(providerSignal?.aborted).toBe(true);
+      expect(tracker.pendingCount).toBe(0);
+    });
+
+    it('propagates caller cancellation to an in-flight provider call', async () => {
+      const caller = new AbortController();
+      let providerSignal: AbortSignal | undefined;
+      const llm: LLMClient = {
+        complete: vi.fn((_prompt: string, options?: { signal?: AbortSignal }) => {
+          providerSignal = options?.signal;
+          return new Promise<string>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              'abort',
+              () => reject(new Error('provider aborted')),
+              { once: true }
+            );
+          });
+        }),
+      };
+      const orchestrator = createOrchestrator(llm, mockToolExecutor, {
+        availableTools: [],
+        signal: caller.signal,
+        totalDeadlineMs: 5_000,
+      });
+      const pending = orchestrator.investigate('caller cancellation test');
+      await vi.waitFor(() => expect(llm.complete).toHaveBeenCalledOnce());
+      caller.abort(new Error('client disconnected'));
+
+      await expect(pending).rejects.toMatchObject({
+        name: 'InvestigationAbortError',
+        code: 'cancelled',
+      });
+      expect(providerSignal?.aborted).toBe(true);
+    });
+
+    it('reports non-cooperative integration work as pending until it really settles', async () => {
+      let resolveGraph!: (value: string[]) => void;
+      const events: InvestigationEvent[] = [];
+      const tracker = new OutstandingWorkTracker(4);
+      const graph = vi.fn(
+        () =>
+          new Promise<string[]>((resolve) => {
+            resolveGraph = resolve;
+          })
+      );
+      const orchestrator = createOrchestrator(mockLLM, mockToolExecutor, {
+        availableTools: [],
+        fetchGraphContext: graph,
+        totalDeadlineMs: 30,
+        outstandingWorkTracker: tracker,
+      });
+      orchestrator.on((event) => events.push(event));
+
+      await expect(
+        orchestrator.investigate('non-cooperative integration test')
+      ).rejects.toBeInstanceOf(InvestigationAbortError);
+      expect(tracker.pendingCount).toBe(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'operation_unfinished',
+          operation: 'integration:graph:falkordb',
+          pendingCount: 1,
+        })
+      );
+
+      resolveGraph(['late result']);
+      await expect(tracker.drain(500)).resolves.toBe(true);
+      expect(tracker.pendingCount).toBe(0);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'operation_late_settled',
+          operation: 'integration:graph:falkordb',
+          outcome: 'fulfilled',
+        })
+      );
+    });
+  });
+
   describe('creation', () => {
     it('should create orchestrator with createOrchestrator function', () => {
       const orchestrator = createOrchestrator(mockLLM, mockToolExecutor);
@@ -244,6 +350,7 @@ describe('InvestigationOrchestrator', () => {
       expect(fetchGraphContext).toHaveBeenCalledWith({
         incidentId: 'INC-NEW',
         query: 'Investigate payment latency',
+        signal: expect.any(AbortSignal),
       });
       const firstPrompt = (mockLLM.complete as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
       expect(firstPrompt).toContain('FalkorDB Historical Graph Context');
@@ -471,7 +578,8 @@ describe('InvestigationOrchestrator', () => {
         'skill',
         expect.objectContaining({
           name: 'deploy-service',
-        })
+        }),
+        { signal: expect.any(AbortSignal) }
       );
       expect(result.remediationPlan?.steps[0]?.status).toBe('completed');
     });
@@ -545,7 +653,8 @@ describe('InvestigationOrchestrator', () => {
         'skill',
         expect.objectContaining({
           name: 'deploy-service',
-        })
+        }),
+        { signal: expect.any(AbortSignal) }
       );
       expect(result.remediationPlan?.steps[0]?.status).toBe('completed');
     });
@@ -592,9 +701,13 @@ describe('InvestigationOrchestrator', () => {
 
       await orchestrator.investigate('Investigate incident');
 
-      expect(execute).toHaveBeenCalledWith('pagerduty_get_incident', {
-        incident_id: 'INC-456',
-      });
+      expect(execute).toHaveBeenCalledWith(
+        'pagerduty_get_incident',
+        {
+          incident_id: 'INC-456',
+        },
+        { signal: expect.any(AbortSignal) }
+      );
     });
 
     it('should query runbooks during triage when search_knowledge is available', async () => {
@@ -625,7 +738,8 @@ describe('InvestigationOrchestrator', () => {
         expect.objectContaining({
           query: expect.stringContaining('Investigate redis timeouts in production'),
           type_filter: ['runbook', 'known_issue'],
-        })
+        }),
+        { signal: expect.any(AbortSignal) }
       );
     });
 
@@ -660,7 +774,11 @@ describe('InvestigationOrchestrator', () => {
       const knowledgeParams = (knowledgeCall?.[1] ?? {}) as Record<string, unknown>;
       expect(String(knowledgeParams.query)).not.toContain(incidentId);
 
-      expect(execute).toHaveBeenCalledWith('cloudwatch_alarms', { state: 'ALARM' });
+      expect(execute).toHaveBeenCalledWith(
+        'cloudwatch_alarms',
+        { state: 'ALARM' },
+        { signal: expect.any(AbortSignal) }
+      );
     });
 
     it('should respect max iterations', async () => {
@@ -765,7 +883,8 @@ describe('InvestigationOrchestrator', () => {
         'github_query',
         expect.objectContaining({
           action: 'fix_candidates',
-        })
+        }),
+        { signal: expect.any(AbortSignal) }
       );
 
       const remediationPromptCall = complete.mock.calls.find(

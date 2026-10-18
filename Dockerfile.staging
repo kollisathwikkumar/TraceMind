@@ -1,0 +1,28 @@
+FROM node:24.11.1-bookworm-slim AS build
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
+COPY . .
+RUN npm run build && npm prune --omit=dev
+
+# This is intentionally a single free Render web service for a disposable
+# staging/demo graph. The graph is bound to loopback and reconstructed from
+# PostgreSQL at startup; it is not a remote TLS endpoint or a durable graph.
+FROM falkordb/falkordb-server@sha256:2e99eb1cfa3309ce338beebe24b5e9f44f9eb8ead6d6ef63dcaca436afbbaeec
+
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+COPY --from=build /app/dist /app/dist
+COPY --from=build /app/node_modules /app/node_modules
+COPY --from=build /app/package.json /app/package.json
+COPY scripts/render-staging-entrypoint.sh /app/render-staging-entrypoint.sh
+
+ENV BROWSER=0 \
+    REDIS_ARGS="--bind 127.0.0.1 --maxmemory 128mb --maxmemory-policy noeviction" \
+    FALKORDB_ARGS="THREAD_COUNT 1"
+
+EXPOSE 10000
+ENTRYPOINT ["/bin/sh", "/app/render-staging-entrypoint.sh"]

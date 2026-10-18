@@ -57,14 +57,18 @@ import type { Tool } from './types';
  * LLM interface for generating structured outputs
  */
 export interface LLMClient {
-  complete(prompt: string): Promise<string>;
+  complete(prompt: string, options?: { signal?: AbortSignal }): Promise<string>;
 }
 
 /**
  * Tool executor interface
  */
 export interface ToolExecutor {
-  execute(toolName: string, parameters: Record<string, unknown>): Promise<unknown>;
+  execute(
+    toolName: string,
+    parameters: Record<string, unknown>,
+    options?: { signal?: AbortSignal }
+  ): Promise<unknown>;
 }
 
 export interface RemediationContext {
@@ -86,8 +90,139 @@ export interface InvestigationOptions {
   availableTools?: string[];
   slackChannel?: string;
   availableSkills?: string[];
-  fetchRelevantRunbooks?: (context: RemediationContext) => Promise<string[]>;
-  fetchGraphContext?: (context: { incidentId?: string; query: string }) => Promise<string[]>;
+  fetchRelevantRunbooks?: (
+    context: RemediationContext & { signal?: AbortSignal }
+  ) => Promise<string[]>;
+  fetchGraphContext?: (context: {
+    incidentId?: string;
+    query: string;
+    signal?: AbortSignal;
+  }) => Promise<string[]>;
+  signal?: AbortSignal;
+  totalDeadlineMs?: number;
+  integrationTimeoutMs?: number;
+  outstandingWorkTracker?: OutstandingWorkTracker;
+}
+
+export type InvestigationOperationEvent =
+  | { type: 'operation_unfinished'; operation: string; durationMs: number; pendingCount: number }
+  | {
+      type: 'operation_late_settled';
+      operation: string;
+      durationMs: number;
+      outcome: 'fulfilled' | 'rejected';
+      pendingCount: number;
+    }
+  | {
+      type: 'operation_timing';
+      operation: string;
+      durationMs: number;
+      outcome: 'fulfilled' | 'rejected';
+    };
+
+/** Tracks work that survives a timeout/abort; a timeout never implies the promise stopped. */
+export class OutstandingWorkTracker {
+  private readonly pending = new Map<
+    number,
+    {
+      operation: string;
+      startedAt: number;
+      abandoned: boolean;
+      onEvent?: (event: InvestigationOperationEvent) => void;
+    }
+  >();
+  private nextId = 1;
+  private closed = false;
+
+  constructor(private readonly maxOutstanding = 32) {}
+
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  track<T>(
+    operation: string,
+    start: () => Promise<T>,
+    onEvent?: (event: InvestigationOperationEvent) => void
+  ): {
+    promise: Promise<T>;
+    abandon: () => void;
+  } {
+    if (this.closed) throw new Error('Investigation work tracker is closed');
+    if (this.pending.size >= this.maxOutstanding)
+      throw new Error('Investigation work capacity is exhausted');
+    const id = this.nextId++;
+    const startedAt = Date.now();
+    const record = { operation, startedAt, abandoned: false, onEvent };
+    this.pending.set(id, record);
+    const promise = Promise.resolve().then(start);
+    const settle = (outcome: 'fulfilled' | 'rejected') => {
+      this.pending.delete(id);
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      if (record.abandoned) {
+        record.onEvent?.({
+          type: 'operation_late_settled',
+          operation,
+          durationMs,
+          outcome,
+          pendingCount: this.pending.size,
+        });
+      } else {
+        record.onEvent?.({ type: 'operation_timing', operation, durationMs, outcome });
+      }
+    };
+    void promise.then(
+      () => settle('fulfilled'),
+      () => settle('rejected')
+    );
+    return {
+      promise,
+      abandon: () => {
+        if (record.abandoned || !this.pending.has(id)) return;
+        record.abandoned = true;
+        record.onEvent?.({
+          type: 'operation_unfinished',
+          operation,
+          durationMs: Math.max(0, Date.now() - startedAt),
+          pendingCount: this.pending.size,
+        });
+      },
+    };
+  }
+
+  async drain(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (this.pending.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    }
+    return this.pending.size === 0;
+  }
+}
+
+export class InvestigationAbortError extends Error {
+  constructor(
+    readonly code: 'cancelled' | 'deadline',
+    readonly pendingOperations: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'InvestigationAbortError';
+  }
+}
+
+export class InvestigationOperationTimeoutError extends Error {
+  readonly code = 'operation_timeout';
+  constructor(
+    readonly operation: string,
+    readonly pendingOperations: number
+  ) {
+    super(`Investigation operation timed out: ${operation}`);
+    this.name = 'InvestigationOperationTimeoutError';
+  }
 }
 
 interface PromptPayloadLimits {
@@ -132,6 +267,7 @@ export interface InvestigationResult {
  * Event emitted during investigation
  */
 export type InvestigationEvent =
+  | InvestigationOperationEvent
   | { type: 'phase_change'; phase: InvestigationPhase; reason: string }
   | { type: 'triage_complete'; result: TriageResult }
   | { type: 'hypothesis_created'; hypothesis: InvestigationHypothesis }
@@ -162,14 +298,94 @@ export class InvestigationOrchestrator {
   private readonly availableTools?: Set<string>;
   private inferredLambdaFunctionName?: string;
   private inferredCloudWatchLogGroup?: string;
+  private activeSignal?: AbortSignal;
+  private deadlineAt = 0;
+  private readonly outstandingWorkTracker: OutstandingWorkTracker;
 
   constructor(llm: LLMClient, toolExecutor: ToolExecutor, options: InvestigationOptions = {}) {
     this.llm = llm;
     this.toolExecutor = toolExecutor;
     this.options = options;
+    this.outstandingWorkTracker = options.outstandingWorkTracker ?? new OutstandingWorkTracker(32);
     this.availableTools = options.availableTools
       ? new Set(options.availableTools.map((tool) => tool.trim()).filter(Boolean))
       : undefined;
+  }
+
+  private abortError(): InvestigationAbortError {
+    const reason = this.activeSignal?.reason as { code?: string } | undefined;
+    const code = reason?.code === 'investigation_deadline' ? 'deadline' : 'cancelled';
+    return new InvestigationAbortError(
+      code,
+      this.outstandingWorkTracker.pendingCount,
+      code === 'deadline' ? 'Investigation deadline exceeded' : 'Investigation cancelled'
+    );
+  }
+
+  private throwIfAborted(): void {
+    if (this.activeSignal?.aborted || (this.deadlineAt > 0 && Date.now() >= this.deadlineAt)) {
+      throw this.abortError();
+    }
+  }
+
+  private async runBounded<T>(
+    operation: string,
+    start: (signal: AbortSignal) => Promise<T>,
+    timeoutMs = this.options.integrationTimeoutMs ?? 15_000
+  ): Promise<T> {
+    this.throwIfAborted();
+    const remainingMs =
+      this.deadlineAt > 0 ? Math.max(0, this.deadlineAt - Date.now()) : Math.max(1, timeoutMs);
+    if (remainingMs === 0) throw this.abortError();
+    const budgetMs = Math.min(Math.max(1, timeoutMs), remainingMs);
+    const controller = new AbortController();
+    const parentSignal = this.activeSignal;
+    const tracked = this.outstandingWorkTracker.track(
+      operation,
+      () => start(controller.signal),
+      (event) => this.emit(event)
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onParentAbort: (() => void) | undefined;
+    const cancellation = new Promise<never>((_, reject) => {
+      onParentAbort = () => {
+        const error = this.abortError();
+        controller.abort(parentSignal?.reason);
+        tracked.abandon();
+        reject(error);
+      };
+      if (parentSignal?.aborted) onParentAbort();
+      else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+      timer = setTimeout(() => {
+        const error = new InvestigationOperationTimeoutError(
+          operation,
+          this.outstandingWorkTracker.pendingCount
+        );
+        controller.abort(error);
+        tracked.abandon();
+        reject(error);
+      }, budgetMs);
+    });
+    try {
+      return await Promise.race([tracked.promise, cancellation]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onParentAbort) parentSignal?.removeEventListener('abort', onParentAbort);
+    }
+  }
+
+  private complete(prompt: string): Promise<string> {
+    return this.runBounded(
+      'llm.complete',
+      (signal) => this.llm.complete(prompt, { signal }),
+      45_000
+    );
+  }
+
+  private executeTool(toolName: string, parameters: Record<string, unknown>): Promise<unknown> {
+    return this.runBounded(`tool.${toolName}`, (signal) =>
+      this.toolExecutor.execute(toolName, parameters, { signal })
+    );
   }
 
   /**
@@ -564,12 +780,15 @@ export class InvestigationOrchestrator {
     }
 
     try {
-      const runbooks = await this.options.fetchRelevantRunbooks(context);
+      const runbooks = await this.runBounded('integration:knowledge:runbooks', (signal) =>
+        this.options.fetchRelevantRunbooks!({ ...context, signal })
+      );
       return Array.from(new Set(runbooks.map((runbook) => runbook.trim()).filter(Boolean))).slice(
         0,
         10
       );
     } catch {
+      this.throwIfAborted();
       return [];
     }
   }
@@ -599,7 +818,7 @@ export class InvestigationOrchestrator {
 
     for (const toolName of tools) {
       try {
-        const result = await this.toolExecutor.execute(toolName, {
+        const result = await this.executeTool(toolName, {
           action: 'fix_candidates',
           query,
           services: affectedServices.slice(0, 6),
@@ -646,6 +865,7 @@ export class InvestigationOrchestrator {
           }
         }
       } catch {
+        this.throwIfAborted();
         // Keep remediation flow resilient when code providers are unavailable.
       }
     }
@@ -760,6 +980,21 @@ export class InvestigationOrchestrator {
    */
   async investigate(query: string, context?: string): Promise<InvestigationResult> {
     const startTime = Date.now();
+    const deadlineController = new AbortController();
+    const callerSignal = this.options.signal;
+    const abortFromCaller = () => deadlineController.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+    const totalDeadlineMs = Math.max(1, this.options.totalDeadlineMs ?? 90_000);
+    this.deadlineAt = Date.now() + totalDeadlineMs;
+    this.activeSignal = deadlineController.signal;
+    const deadlineTimer = setTimeout(() => {
+      deadlineController.abort(
+        Object.assign(new Error('Investigation deadline exceeded'), {
+          code: 'investigation_deadline',
+        })
+      );
+    }, totalDeadlineMs);
     const machine = createInvestigation(query, {
       incidentId: this.options.incidentId,
       maxIterations: this.options.maxIterations,
@@ -769,6 +1004,7 @@ export class InvestigationOrchestrator {
     this.setupMachineEvents(machine);
 
     try {
+      this.throwIfAborted();
       // Start the investigation
       machine.start();
 
@@ -812,7 +1048,12 @@ export class InvestigationOrchestrator {
       const err = error instanceof Error ? error : new Error(String(error));
       machine.recordError(err);
       this.emit({ type: 'error', phase: machine.getPhase(), error: err });
+      if (deadlineController.signal.aborted) throw this.abortError();
       throw error;
+    } finally {
+      clearTimeout(deadlineTimer);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
+      this.activeSignal = undefined;
     }
   }
 
@@ -859,7 +1100,7 @@ export class InvestigationOrchestrator {
       context: triageContext,
     });
 
-    const response = await this.llm.complete(prompt);
+    const response = await this.complete(prompt);
     const triageResponse = parseTriageResponse(response);
     const triageResult = toTriageResult(triageResponse, this.options.incidentId);
 
@@ -888,10 +1129,13 @@ export class InvestigationOrchestrator {
 
     if (this.options.fetchGraphContext) {
       try {
-        const graphFindings = await this.options.fetchGraphContext({
-          incidentId: this.options.incidentId,
-          query,
-        });
+        const graphFindings = await this.runBounded('integration:graph:falkordb', (signal) =>
+          this.options.fetchGraphContext!({
+            incidentId: this.options.incidentId,
+            query,
+            signal,
+          })
+        );
         if (graphFindings.length > 0) {
           contextParts.push(
             `FalkorDB Historical Graph Context:\n${graphFindings
@@ -901,6 +1145,7 @@ export class InvestigationOrchestrator {
           );
         }
       } catch (error) {
+        this.throwIfAborted();
         // Graph retrieval is supplemental. Keep the investigation alive while
         // making the missing retrieval explicit to the reasoning prompt.
         contextParts.push(
@@ -945,7 +1190,7 @@ export class InvestigationOrchestrator {
         this.emit({ type: 'query_executing', query: triageQuery });
 
         try {
-          const result = await this.toolExecutor.execute(source.tool, source.params);
+          const result = await this.executeTool(source.tool, source.params);
           this.emit({ type: 'query_complete', query: triageQuery, result });
           if (result && typeof result === 'object' && !(result as Record<string, unknown>).error) {
             contextParts.push(
@@ -954,6 +1199,7 @@ export class InvestigationOrchestrator {
             break;
           }
         } catch (error) {
+          this.throwIfAborted();
           this.emit({
             type: 'query_complete',
             query: triageQuery,
@@ -1002,7 +1248,7 @@ export class InvestigationOrchestrator {
       };
       this.emit({ type: 'query_executing', query: triageQuery });
       try {
-        const result = await this.toolExecutor.execute(source.tool, source.params);
+        const result = await this.executeTool(source.tool, source.params);
         this.emit({ type: 'query_complete', query: triageQuery, result });
         this.updateCloudWatchHints(source.tool, result, source.params);
         if (result) {
@@ -1014,6 +1260,7 @@ export class InvestigationOrchestrator {
           }
         }
       } catch (error) {
+        this.throwIfAborted();
         this.emit({
           type: 'query_complete',
           query: triageQuery,
@@ -1040,7 +1287,7 @@ export class InvestigationOrchestrator {
       services: triage.affectedServices.join(', ') || 'Unknown',
     });
 
-    const response = await this.llm.complete(prompt);
+    const response = await this.complete(prompt);
     const hypothesisGen = parseHypothesisGeneration(response);
 
     // Add each hypothesis to the state machine
@@ -1143,15 +1390,13 @@ export class InvestigationOrchestrator {
       this.emit({ type: 'query_executing', query: runnableQuery });
 
       try {
-        const result = await this.toolExecutor.execute(
-          runnableQuery.tool,
-          runnableQuery.parameters
-        );
+        const result = await this.executeTool(runnableQuery.tool, runnableQuery.parameters);
         this.updateCloudWatchHints(runnableQuery.tool, result, runnableQuery.parameters);
         queryResults.set(runnableQuery.id, result);
         machine.recordQueryResult(hypothesis.id, runnableQuery.id, result);
         this.emit({ type: 'query_complete', query: runnableQuery, result });
       } catch (error) {
+        this.throwIfAborted();
         const failure = { error: error instanceof Error ? error.message : String(error) };
         queryResults.set(runnableQuery.id, failure);
         machine.recordQueryResult(hypothesis.id, runnableQuery.id, failure);
@@ -1193,7 +1438,7 @@ export class InvestigationOrchestrator {
       evidence: evidenceLines.join('\n\n'),
     });
 
-    const response = await this.llm.complete(prompt);
+    const response = await this.complete(prompt);
     const evaluationInput = parseEvidenceEvaluation(response);
 
     // Override hypothesis ID to match current hypothesis
@@ -1243,7 +1488,7 @@ export class InvestigationOrchestrator {
           .join('\n') || 'None',
     });
 
-    const response = await this.llm.complete(prompt);
+    const response = await this.complete(prompt);
     const conclusionInput = parseConclusion(response);
 
     // Use the actual confirmed hypothesis ID
@@ -1296,7 +1541,7 @@ export class InvestigationOrchestrator {
       codeFixes: this.formatPromptList(codeFixCandidates, 'None found'),
     });
 
-    const response = await this.llm.complete(prompt);
+    const response = await this.complete(prompt);
     const planInput = parseRemediationPlan(response);
     const steps = toRemediationSteps(planInput);
 
@@ -1358,7 +1603,7 @@ export class InvestigationOrchestrator {
       this.emit({ type: 'remediation_step', step, status: 'executing' });
 
       try {
-        const result = await this.toolExecutor.execute('skill', {
+        const result = await this.executeTool('skill', {
           name: step.matchingSkill,
           args: {
             action: step.action,
@@ -1409,7 +1654,7 @@ export class InvestigationOrchestrator {
         endTime: timeRange?.end.toISOString() || 'unknown',
       });
 
-      const response = await this.llm.complete(prompt);
+      const response = await this.complete(prompt);
       const llmAnalysis = parseLogAnalysis(response);
 
       // Merge LLM findings with pattern analysis
@@ -1421,6 +1666,7 @@ export class InvestigationOrchestrator {
         result.summary = llmAnalysis.summary;
       }
     } catch (e) {
+      this.throwIfAborted();
       // Fall back to pattern-only analysis
     }
 

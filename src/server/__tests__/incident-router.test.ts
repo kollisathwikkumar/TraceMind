@@ -721,6 +721,239 @@ describe('incident API', () => {
     ).toContain('status_changed');
   });
 
+  it('runs a tenant-scoped hosted investigation and returns a proposal without executing remediation', async () => {
+    const investigateIncident = vi.fn().mockResolvedValue({
+      id: 'investigation-1',
+      query: 'Latency spike',
+      rootCause: 'database saturation',
+      summary: 'Database saturation caused elevated latency.',
+      durationMs: 42,
+    });
+    const getInvestigationHistory = vi.fn().mockResolvedValue([{ investigationId: 'prior-1' }]);
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      investigateIncident,
+      getInvestigationHistory,
+    });
+    const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        title: 'Latency spike',
+        description: 'p95 is elevated',
+        severity: 'SEV-2',
+      }),
+    });
+    const incident = ((await created.json()) as { data: { id: string } }).data;
+
+    const unauthenticated = await fetch(`${base}/api/v1/incidents/${incident.id}/investigations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(unauthenticated.status).toBe(401);
+    expect(investigateIncident).not.toHaveBeenCalled();
+
+    const response = await fetch(`${base}/api/v1/incidents/${incident.id}/investigations`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ additionalContext: 'Checkout API logs' }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      data: { id: 'investigation-1', rootCause: 'database saturation' },
+      meta: { provenance: expect.stringContaining('no remediation action was executed') },
+    });
+    expect(investigateIncident).toHaveBeenCalledExactlyOnceWith({
+      incident: expect.objectContaining({ id: incident.id }),
+      tenantId: 'default',
+      additionalContext: 'Checkout API logs',
+      signal: expect.any(AbortSignal),
+      traceId: expect.any(String),
+    });
+
+    const history = await fetch(`${base}/api/v1/incidents/${incident.id}/investigations`, {
+      headers,
+    });
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({ data: [{ investigationId: 'prior-1' }] });
+    expect(getInvestigationHistory).toHaveBeenCalledExactlyOnceWith(incident.id, 'default');
+  });
+
+  it('returns 400 for malformed percent-encoded hosted-investigation incident IDs', async () => {
+    const investigateIncident = vi.fn();
+    const base = await startApi(DEFAULT_CONFIG, undefined, { investigateIncident });
+    const response = await fetch(`${base}/api/v1/incidents/%E0%A4%A/investigations`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'invalid_incident_id' } });
+    expect(investigateIncident).not.toHaveBeenCalled();
+  });
+
+  it('enforces tenant and write scope, then blocks hosted investigation for multiple configured orgs', async () => {
+    const investigateIncident = vi.fn().mockResolvedValue({
+      id: 'investigation-1',
+      query: 'Latency',
+      summary: 'done',
+      durationMs: 10,
+    });
+    const identities = {
+      reader: { sub: 'reader', scopes: ['incidents:read'], roles: [], organizationId: 'org-a' },
+      writer: { sub: 'writer', scopes: ['incidents:write'], roles: [], organizationId: 'org-a' },
+      otherTenant: {
+        sub: 'other',
+        scopes: ['incidents:write'],
+        roles: [],
+        organizationId: 'org-b',
+      },
+    };
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      graphOrgId: 'org-a',
+      auth0OrgIds: ['org-a', 'org-b'],
+      verifyAuth0Token: async (token) => identities[token as keyof typeof identities],
+      investigateIncident,
+    });
+    const apiHeaders = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers: apiHeaders,
+      body: JSON.stringify({ title: 'Latency', severity: 'SEV-2' }),
+    });
+    const incidentId = ((await created.json()) as { data: { id: string } }).data.id;
+    const path = `${base}/api/v1/incidents/${incidentId}/investigations`;
+    const reader = await fetch(path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer reader', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(reader.status).toBe(403);
+    expect(await reader.json()).toMatchObject({ error: { code: 'insufficient_scope' } });
+
+    const wrongTenant = await fetch(path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer otherTenant', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(wrongTenant.status).toBe(404);
+
+    const writer = await fetch(path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer writer', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(writer.status).toBe(503);
+    expect(await writer.json()).toMatchObject({
+      error: { code: 'investigation_org_provider_binding_required' },
+    });
+    expect(investigateIncident).not.toHaveBeenCalled();
+  });
+
+  it('validates hosted investigation context and normalizes provider failures', async () => {
+    const investigateIncident = vi.fn().mockRejectedValueOnce(new Error('provider secret body'));
+    const base = await startApi(DEFAULT_CONFIG, undefined, { investigateIncident });
+    const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'Latency', severity: 'SEV-2' }),
+    });
+    const incidentId = ((await created.json()) as { data: { id: string } }).data.id;
+    const path = `${base}/api/v1/incidents/${incidentId}/investigations`;
+
+    const invalid = await fetch(path, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ additionalContext: 'x'.repeat(8_001) }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(investigateIncident).not.toHaveBeenCalled();
+
+    const failed = await fetch(path, { method: 'POST', headers, body: '{}' });
+    expect(failed.status).toBe(502);
+    const failureBody = await failed.text();
+    expect(failureBody).toContain('investigation_failed');
+    expect(failureBody).not.toContain('provider secret body');
+  });
+
+  it('returns a deadline response and aborts the hosted investigation signal', async () => {
+    let investigationSignal: AbortSignal | undefined;
+    const investigateIncident = vi.fn(({ signal }: { signal?: AbortSignal }) => {
+      if (!signal) throw new Error('missing request signal');
+      investigationSignal = signal;
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('cancelled by deadline')), {
+          once: true,
+        });
+      });
+    });
+    const base = await startApi(DEFAULT_CONFIG, undefined, {
+      investigateIncident,
+      investigationTimeoutMs: 1_000,
+    });
+    const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'deadline', severity: 'SEV-2' }),
+    });
+    const incidentId = ((await created.json()) as { data: { id: string } }).data.id;
+    const response = await fetch(`${base}/api/v1/incidents/${incidentId}/investigations`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    });
+
+    expect(response.status).toBe(504);
+    expect(await response.json()).toMatchObject({ error: { code: 'investigation_deadline' } });
+    expect(investigationSignal?.aborted).toBe(true);
+  });
+
+  it('propagates a disconnected caller to the hosted investigation signal', async () => {
+    let investigationSignal: AbortSignal | undefined;
+    let observedAbort!: () => void;
+    const aborted = new Promise<void>((resolve) => {
+      observedAbort = resolve;
+    });
+    const investigateIncident = vi.fn(({ signal }: { signal?: AbortSignal }) => {
+      if (!signal) throw new Error('missing request signal');
+      investigationSignal = signal;
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            observedAbort();
+            reject(new Error('caller disconnected'));
+          },
+          { once: true }
+        );
+      });
+    });
+    const base = await startApi(DEFAULT_CONFIG, undefined, { investigateIncident });
+    const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };
+    const created = await fetch(`${base}/api/v1/incidents`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'disconnect', severity: 'SEV-2' }),
+    });
+    const incidentId = ((await created.json()) as { data: { id: string } }).data.id;
+    const controller = new AbortController();
+    const request = fetch(`${base}/api/v1/incidents/${incidentId}/investigations`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(investigateIncident).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(aborted).resolves.toBeUndefined();
+    expect(investigationSignal?.aborted).toBe(true);
+  });
+
   it('validates create and update fields', async () => {
     const base = await startApi();
     const headers = { Authorization: 'Bearer test-key', 'Content-Type': 'application/json' };

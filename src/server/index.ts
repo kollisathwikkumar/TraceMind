@@ -29,6 +29,18 @@ import { migrateGraphCatalog, PostgresGraphCatalogStore } from './graph-catalog'
 import { resolveAuth0Config, createAuth0TokenVerifier } from './auth0';
 import { migrateProviderKeys, ProviderKeyStore } from './provider-keys';
 import { resolveRemediationExecutor } from './workflows/http-executor';
+import {
+  closeHostedInvestigationWork,
+  createIncidentInvestigator,
+  drainHostedInvestigationWork,
+  hostedInvestigationWorkTracker,
+  runTrackedHostedOperation,
+} from './investigation';
+import {
+  migrateIncidentMemory,
+  minimizeResult,
+  PostgresIncidentMemoryStore,
+} from './incident-memory-store';
 
 export interface ServerOptions {
   port: number;
@@ -94,10 +106,13 @@ export async function startServer(options: ServerOptions): Promise<void> {
   let workflowStore: WorkflowRepository;
   let closeDatabase: () => Promise<void>;
   let providerKeyStore: ProviderKeyStore | undefined;
+  let incidentMemoryStore: PostgresIncidentMemoryStore | undefined;
   let graphOutbox: Awaited<ReturnType<typeof createPostgresStores>>['graphOutbox'] | undefined;
   let graphCatalogStore: PostgresGraphCatalogStore | undefined;
   let databaseDriver: 'postgres' | 'sqlite';
   if (stores) {
+    await migrateIncidentMemory(stores.migrationPool, stores.runtimeRole);
+    incidentMemoryStore = new PostgresIncidentMemoryStore(stores.pool);
     incidentStore = stores.incidentStore;
     workflowStore = stores.workflowStore;
     graphOutbox = stores.graphOutbox;
@@ -148,6 +163,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
     // Fallback is fine
   }
 
+  const serverShutdownController = new AbortController();
   const router = createRouter({
     apiKey,
     retriever,
@@ -169,6 +185,71 @@ export async function startServer(options: ServerOptions): Promise<void> {
     retrieverForTenant: getTenantRetriever,
     remediationExecutorRequired,
     buildSha: resolveBuildSha(),
+    shutdownSignal: serverShutdownController.signal,
+    investigationTimeoutMs: 90_000,
+    investigateIncident: async ({ incident, tenantId, additionalContext, signal, traceId }) => {
+      const priorMemories = incidentMemoryStore
+        ? await runTrackedHostedOperation(
+            'database:investigation_memory_search',
+            () =>
+              incidentMemoryStore!.findRelevant(
+                tenantId,
+                [incident.title, incident.description, additionalContext]
+                  .filter(Boolean)
+                  .join('\n'),
+                5
+              ),
+            signal,
+            10_000,
+            traceId
+          )
+        : [];
+      const investigator = createIncidentInvestigator({
+        config: effectiveConfig,
+        retrieverForTenant: getTenantRetriever,
+        graphStore: graphConnection?.store,
+      });
+      const result = await investigator({
+        incident,
+        tenantId,
+        additionalContext,
+        priorMemory: priorMemories.map((record) => record.summary),
+        signal,
+        traceId,
+      });
+      if (incidentMemoryStore) {
+        // History keeps only concise conclusion metadata, not the raw query,
+        // model narrative, integration evidence, or provider payloads.
+        const summary = [
+          result.rootCause?.slice(0, 2_000),
+          ...(result.affectedServices ?? []).slice(0, 50).map((service) => service.slice(0, 200)),
+        ]
+          .filter(Boolean)
+          .join('\n')
+          .slice(0, 8_000);
+        await runTrackedHostedOperation(
+          'database:investigation_memory_save',
+          () =>
+            incidentMemoryStore!.save({
+              tenantId,
+              incidentId: incident.id,
+              investigationId: result.id,
+              summary: summary || `Investigation ${result.id} completed`,
+              result: minimizeResult({
+                rootCause: result.rootCause,
+                affectedServices: result.affectedServices,
+                confidence: result.confidence,
+              }),
+            }),
+          signal,
+          10_000,
+          traceId
+        );
+      }
+      return result;
+    },
+    getInvestigationHistory: async (incidentId, tenantId) =>
+      (await incidentMemoryStore?.getHistory(tenantId, incidentId, 20)) ?? [],
   });
   const server = createServer(router);
 
@@ -178,12 +259,18 @@ export async function startServer(options: ServerOptions): Promise<void> {
           for (const tenantId of reconciliationTenants) {
             if (graphCatalogStore) {
               void graphCatalogStore.replay(graphConnection!.store, tenantId).catch((error) => {
-                console.error('Graph catalog outbox replay failed', error instanceof Error ? error.message : 'unknown error');
+                console.error(
+                  'Graph catalog outbox replay failed',
+                  error instanceof Error ? error.message : 'unknown error'
+                );
               });
             }
             if (graphOutbox) {
               void graphOutbox.replay(graphConnection!.store, tenantId).catch((error) => {
-                console.error('Legacy graph projection outbox replay failed', error instanceof Error ? error.message : 'unknown error');
+                console.error(
+                  'Legacy graph projection outbox replay failed',
+                  error instanceof Error ? error.message : 'unknown error'
+                );
               });
             }
           }
@@ -208,11 +295,23 @@ export async function startServer(options: ServerOptions): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    serverShutdownController.abort(
+      Object.assign(new Error('Server is shutting down'), { code: 'server_shutdown' })
+    );
+    closeHostedInvestigationWork();
     console.log('\nShutting down...');
     const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
     // Force exit after 5s if a request or client fails to drain.
     setTimeout(() => process.exit(1), 5000).unref();
     await serverClosed;
+    const drained = await drainHostedInvestigationWork(5_000);
+    if (!drained) {
+      console.error(
+        `Investigation shutdown drain timed out with ${hostedInvestigationWorkTracker.pendingCount} unfinished operation(s)`
+      );
+      process.exit(1);
+      return;
+    }
     if (graphReplayTimer) clearInterval(graphReplayTimer);
     clearInterval(leaseReconciliationTimer);
     for (const tenantRetriever of tenantRetrievers.values()) {

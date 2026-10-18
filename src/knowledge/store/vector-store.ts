@@ -192,6 +192,7 @@ export class VectorStore {
       typeFilter?: KnowledgeType[];
       serviceFilter?: string[];
       minScore?: number;
+      signal?: AbortSignal;
     } = {}
   ): Promise<RetrievedChunk[]> {
     if (!isEmbedderConfigured()) {
@@ -202,7 +203,7 @@ export class VectorStore {
     const minScore = options.minScore || 0.5;
 
     // Generate query embedding
-    const queryEmbedding = await embedText(query);
+    const queryEmbedding = await embedText(query, options.signal);
 
     // Calculate similarities
     const scored: Array<{ id: string; score: number }> = [];

@@ -101,13 +101,14 @@ export async function executeListOperation(
     accountName?: string;
     region?: string;
     limit?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<{
   resources: Record<string, unknown>[];
   count: number;
   service: string;
 }> {
-  const { accountName, region, limit } = options;
+  const { accountName, region, limit, signal } = options;
   const operation = service.listOperation;
 
   // Import the SDK module
@@ -127,7 +128,9 @@ export async function executeListOperation(
 
   // Get the client using our multi-account system
   const client = await getClient(
-    ClientClass as new (config: { region: string }) => { send: (cmd: unknown) => Promise<unknown> },
+    ClientClass as new (config: { region: string }) => {
+      send: (cmd: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
+    },
     { accountName, region }
   );
 
@@ -147,7 +150,11 @@ export async function executeListOperation(
     }
 
     const command = new CommandClass(params);
-    const response = await (client as { send: (cmd: unknown) => Promise<unknown> }).send(command);
+    const response = await (
+      client as {
+        send: (cmd: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
+      }
+    ).send(command, signal ? { abortSignal: signal } : undefined);
 
     // Extract results
     const resultPath = operation.resultPath;
@@ -198,6 +205,7 @@ export async function executeMultiServiceQuery(
     accountName?: string;
     region?: string;
     limit?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<
   Record<string, { resources: Record<string, unknown>[]; count: number; error?: string }>

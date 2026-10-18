@@ -1,0 +1,69 @@
+# Dedicated free staging service. FalkorDB runs in-process as a loopback-only,
+# ephemeral demo graph; production and remote TLS graph resources are separate.
+services:
+  - type: web
+    name: tracemind-staging
+    runtime: docker
+    repo: https://github.com/kollisathwikkumar/TraceMind
+    branch: codex/hosted-investigation-route-2026-10-18
+    region: singapore
+    plan: free
+    autoDeployTrigger: off
+    dockerfilePath: ./Dockerfile.staging
+    healthCheckPath: /readyz
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: NODE_VERSION
+        value: 24.11.1
+      - key: NODE_ENV
+        value: production
+      - key: TRACEMIND_REQUIRE_POSTGRES
+        value: 'true'
+      - key: TRACEMIND_REQUIRE_FALKORDB
+        value: 'true'
+      - key: TRACEMIND_SERVER_API_KEY
+        sync: false
+      - key: TRACEMIND_DATABASE_URL
+        sync: false
+      - key: TRACEMIND_DATABASE_MIGRATION_URL
+        sync: false
+      - key: TRACEMIND_DATABASE_RUNTIME_ROLE
+        value: tracemind_stage_runtime
+      - key: TRACEMIND_FALKORDB_URL
+        value: redis://127.0.0.1:6379
+      - key: TRACEMIND_FALKORDB_GRAPH_NAME
+        value: tracemind-staging-2026-10-18
+      - key: TRACEMIND_ORG_ID
+        sync: false
+      - key: TRACEMIND_ORG_IDS
+        sync: false
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_AUDIENCE
+        sync: false
+      - key: TRACEMIND_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: TRACEMIND_LLM_PROVIDER
+        sync: false
+      - key: TRACEMIND_LLM_MODEL
+        sync: false
+      - key: TRACEMIND_LLM_API_KEY
+        sync: false
+      - key: TRACEMIND_LLM_API_BASE_URL
+        sync: false
+      - key: TRACEMIND_LLM_FALLBACK_PROVIDER
+        sync: false
+      - key: TRACEMIND_LLM_FALLBACK_MODEL
+        sync: false
+      - key: TRACEMIND_LLM_FALLBACK_API_KEY
+        sync: false
+      - key: TRACEMIND_LLM_FALLBACK_API_BASE_URL
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_URL
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_TOKEN
+        sync: false
+      - key: TRACEMIND_REMEDIATION_EXECUTOR_REQUIRED
+        value: 'false'

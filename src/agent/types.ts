@@ -175,7 +175,12 @@ export interface Tool {
   name: string;
   description: string;
   parameters: ToolParameters;
-  execute: (args: Record<string, unknown>) => Promise<unknown>;
+  execute: (args: Record<string, unknown>, context?: ToolExecutionContext) => Promise<unknown>;
+}
+
+/** Optional per-call context for cancellable integrations. */
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
 }
 
 export interface ToolCall {

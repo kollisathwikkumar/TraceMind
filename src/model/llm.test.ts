@@ -49,7 +49,11 @@ describe('OpenAI-compatible model configuration', () => {
     const original = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'existing-process-key';
     try {
-      const client = createLLMClient({ provider: 'openai', model: 'gpt-4o', apiKey: 'request-key' });
+      const client = createLLMClient({
+        provider: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'request-key',
+      });
       await client.chat('system', 'user');
       expect(complete).toHaveBeenCalledWith(
         expect.any(Object),
@@ -139,6 +143,32 @@ describe('OpenAI-compatible model configuration', () => {
     await vi.advanceTimersByTimeAsync(25);
     await pending;
     vi.useRealTimers();
+  });
+
+  it('propagates caller cancellation to the provider request', async () => {
+    let providerSignal: AbortSignal | undefined;
+    complete.mockImplementation(
+      (_model: unknown, _context: unknown, options: { signal?: AbortSignal }) => {
+        providerSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => reject(new Error('provider aborted')), {
+            once: true,
+          });
+        });
+      }
+    );
+    const client = createLLMClient({
+      provider: 'openai-compatible',
+      model: 'vendor/model',
+      apiBaseUrl: 'https://api.example.test/v1',
+    });
+    const caller = new AbortController();
+    const pending = client.chat('system', 'user', undefined, { signal: caller.signal });
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    caller.abort();
+
+    await expect(pending).rejects.toThrow('provider aborted');
+    expect(providerSignal?.aborted).toBe(true);
   });
 
   it('adds NVIDIA chat template options to the outbound completion payload', async () => {

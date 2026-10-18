@@ -74,7 +74,8 @@ export async function getMetricStatistics(
   endTime: Date,
   period: number = 300,
   statistics: Statistic[] = ['Average'],
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<MetricDatapoint[]> {
   const cw = getCloudWatchClient(region);
 
@@ -88,7 +89,7 @@ export async function getMetricStatistics(
     Statistics: statistics,
   });
 
-  const response = await cw.send(command);
+  const response = await cw.send(command, signal ? { abortSignal: signal } : undefined);
 
   return (response.Datapoints || [])
     .map((dp) => ({
@@ -105,7 +106,8 @@ export async function getMetricStatistics(
 export async function describeAlarms(
   stateValue?: 'OK' | 'ALARM' | 'INSUFFICIENT_DATA',
   alarmNamePrefix?: string,
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<AlarmInfo[]> {
   const cw = getCloudWatchClient(region);
 
@@ -114,7 +116,7 @@ export async function describeAlarms(
     AlarmNamePrefix: alarmNamePrefix,
   });
 
-  const response = await cw.send(command);
+  const response = await cw.send(command, signal ? { abortSignal: signal } : undefined);
 
   return (response.MetricAlarms || []).map((alarm) => ({
     alarmName: alarm.AlarmName || '',
@@ -136,8 +138,8 @@ export async function describeAlarms(
 /**
  * Get alarms that are currently in ALARM state
  */
-export async function getActiveAlarms(region?: string): Promise<AlarmInfo[]> {
-  return describeAlarms('ALARM', undefined, region);
+export async function getActiveAlarms(region?: string, signal?: AbortSignal): Promise<AlarmInfo[]> {
+  return describeAlarms('ALARM', undefined, region, signal);
 }
 
 /**
@@ -145,7 +147,8 @@ export async function getActiveAlarms(region?: string): Promise<AlarmInfo[]> {
  */
 export async function listLogGroups(
   prefix?: string,
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<{ logGroupName: string; storedBytes: number; retentionDays: number | undefined }[]> {
   const logs = getLogsClient(region);
 
@@ -153,7 +156,7 @@ export async function listLogGroups(
     logGroupNamePrefix: prefix,
   });
 
-  const response = await logs.send(command);
+  const response = await logs.send(command, signal ? { abortSignal: signal } : undefined);
 
   return (response.logGroups || []).map((lg) => ({
     logGroupName: lg.logGroupName || '',
@@ -171,7 +174,8 @@ export async function filterLogEvents(
   startTime: Date,
   endTime: Date,
   limit: number = 100,
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<LogEvent[]> {
   const logs = getLogsClient(region);
 
@@ -183,7 +187,7 @@ export async function filterLogEvents(
     limit,
   });
 
-  const response = await logs.send(command);
+  const response = await logs.send(command, signal ? { abortSignal: signal } : undefined);
 
   return (response.events || []).map((event) => ({
     timestamp: event.timestamp || 0,
@@ -198,7 +202,8 @@ export async function filterLogEvents(
 export async function searchRecentErrors(
   logGroupName: string,
   minutesBack: number = 15,
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<LogEvent[]> {
   const endTime = new Date();
   const startTime = new Date(endTime.getTime() - minutesBack * 60 * 1000);
@@ -209,7 +214,8 @@ export async function searchRecentErrors(
     startTime,
     endTime,
     50,
-    region
+    region,
+    signal
   );
 }
 
@@ -220,7 +226,8 @@ export async function getServiceMetrics(
   serviceName: string,
   clusterName: string,
   minutesBack: number = 60,
-  region?: string
+  region?: string,
+  signal?: AbortSignal
 ): Promise<{
   cpuUtilization: MetricDatapoint[];
   memoryUtilization: MetricDatapoint[];
@@ -242,7 +249,8 @@ export async function getServiceMetrics(
       endTime,
       300,
       ['Average'],
-      region
+      region,
+      signal
     ),
     getMetricStatistics(
       'AWS/ECS',
@@ -252,7 +260,8 @@ export async function getServiceMetrics(
       endTime,
       300,
       ['Average'],
-      region
+      region,
+      signal
     ),
   ]);
 
