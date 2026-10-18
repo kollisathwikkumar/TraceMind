@@ -6,6 +6,13 @@
 >
 > TraceMind can use **FalkorDB** to represent service dependencies and incident relationships, traverse bounded evidence paths, and show the graph context behind an investigation. The graph is an optional, independently configured projection; the relational database remains the source of truth for incident and remediation records.
 
+## Project links
+
+- **Source repository:** [github.com/kollisathwikkumar/TraceMind](https://github.com/kollisathwikkumar/TraceMind)
+- **Hosted dashboard:** [tracemind-7hel.onrender.com/admin](https://tracemind-7hel.onrender.com/admin)
+
+The hosted dashboard currently runs on Render's Free plan. Render's local filesystem (including `/tmp`) is ephemeral, so data that must survive restarts belongs in configured external storage; filesystem-backed source files need to be available again for a later sync.
+
 ## Key features
 
 - **Incident operations:** create and update incidents, assign owners, track severity and status, and inspect an auditable event timeline.
