@@ -13,28 +13,8 @@ export function safeAuthReturnTarget(
   }
 }
 
-/**
- * Minimum read permissions requested when the operations dashboard starts.
- * Auth0 returns only permissions actually granted to the member, so this does
- * not elevate a newly provisioned user. It does prevent a successful login
- * from immediately failing to load the first dashboard view because the SPA
- * only requested OIDC identity scopes.
- */
-export const DASHBOARD_READ_SCOPES = [
-  'incidents:read',
-  'knowledge:read',
-  'graph:read',
-  'remediations:read',
-  'evaluations:read',
-] as const;
-
-export const DASHBOARD_AUTHORIZATION_SCOPE = [
-  'openid',
-  'profile',
-  'email',
-  ...DASHBOARD_READ_SCOPES,
-  'llm:validate',
-].join(' ');
+/** Request identity at login; route permissions are acquired silently per API operation. */
+export const DASHBOARD_AUTHORIZATION_SCOPE = 'openid profile email';
 
 /**
  * Preserve Auth0 organization invitations while keeping the organization

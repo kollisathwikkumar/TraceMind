@@ -60,21 +60,10 @@ describe('organizationLoginAuthorizationParams', () => {
     );
   });
 
-  it('requests the read permissions the initial dashboard needs without requesting write access', () => {
+  it('requests only identity scopes at login; API permissions are obtained per route', () => {
     const authorizationParams = organizationLoginAuthorizationParams('org_tracemind', '');
 
-    expect(authorizationParams?.scope.split(' ')).toEqual([
-      'openid',
-      'profile',
-      'email',
-      'incidents:read',
-      'knowledge:read',
-      'graph:read',
-      'remediations:read',
-      'evaluations:read',
-      'llm:validate',
-    ]);
-    expect(authorizationParams?.scope).not.toContain(':write');
+    expect(authorizationParams?.scope).toBe('openid profile email');
   });
 });
 

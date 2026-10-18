@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminApi } from './api';
 
-describe('AdminApi LLM validation authorization', () => {
+describe('AdminApi route authorization', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -97,7 +97,7 @@ describe('AdminApi LLM validation authorization', () => {
     expect(result.credentialSource).toBe('primary');
   });
 
-  it('does not request the validation-only scope for unrelated API calls', async () => {
+  it('does not request a protected scope for public health', async () => {
     const credential = vi.fn(async (_scope?: string) => 'dashboard-access-token');
     vi.stubGlobal(
       'fetch',
@@ -113,6 +113,88 @@ describe('AdminApi LLM validation authorization', () => {
     await new AdminApi(credential).getHealth();
 
     expect(credential).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it.each([
+    ['incident read', (api: AdminApi) => api.getIncidents(), 'incidents:read'],
+    [
+      'incident write',
+      (api: AdminApi) => api.createIncident({ title: 'Checkout errors', severity: 'SEV-3' }),
+      'incidents:write',
+    ],
+    ['graph evidence read', (api: AdminApi) => api.getEvidencePaths('incident-1'), 'graph:read'],
+    ['knowledge read', (api: AdminApi) => api.getStats(), 'knowledge:read'],
+    [
+      'POST knowledge search read',
+      (api: AdminApi) => api.search('payment errors'),
+      'knowledge:read',
+    ],
+    ['knowledge write', (api: AdminApi) => api.sync(), 'knowledge:write'],
+    ['provider-key settings', (api: AdminApi) => api.getProviderKeyStatus(), 'settings:keys'],
+    ['remediation read', (api: AdminApi) => api.getRemediation('plan-1'), 'remediations:read'],
+    [
+      'remediation approval',
+      (api: AdminApi) => api.remediationDecision('plan-1', 'step-1', 'approve', 'reviewed'),
+      'remediations:approve',
+    ],
+    [
+      'remediation execution',
+      (api: AdminApi) => api.executeRemediation('plan-1', 'step-1'),
+      'remediations:execute',
+    ],
+    ['evaluation read', (api: AdminApi) => api.getEvaluationAnalytics('demo'), 'evaluations:read'],
+  ])('requests only the %s scope', async (_label, invoke, scope) => {
+    const credential = vi.fn(async (_scope?: string) => 'scoped-token');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    await invoke(new AdminApi(credential));
+
+    expect(credential).toHaveBeenCalledExactlyOnceWith(scope);
+  });
+
+  it.each([
+    [
+      'missing permission',
+      'insufficient_scope',
+      { code: 'insufficient_scope', message: 'Required permission: incidents:read' },
+      'Your TraceMind organization role is missing incidents:read.',
+    ],
+    [
+      'missing organization',
+      'tenant_required',
+      { code: 'tenant_required', message: 'Auth0 token must include an organization claim' },
+      'This sign-in is not associated with a TraceMind organization.',
+    ],
+    [
+      'organization not enabled',
+      'tenant_forbidden',
+      { code: 'tenant_forbidden', message: 'Token organization is not enabled for this service' },
+      'This TraceMind organization is not enabled for this service.',
+    ],
+  ])('explains a %s response in dashboard language', async (_label, _code, error, message) => {
+    const credential = vi.fn(async (_scope?: string) => 'scoped-token');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    await expect(new AdminApi(credential).getIncidents()).rejects.toThrow(message);
+    expect(credential).toHaveBeenCalledExactlyOnceWith('incidents:read');
   });
 
   it('explains when the validation route returns an HTML page instead of JSON', async () => {
