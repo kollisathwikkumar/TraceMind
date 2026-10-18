@@ -359,7 +359,7 @@ export function validateConfig(config: Config): string[] {
   const providerEnvKeys: Record<string, string> = {
     openai: 'OPENAI_API_KEY',
     anthropic: 'ANTHROPIC_API_KEY',
-    google: 'GOOGLE_API_KEY',
+    google: 'GEMINI_API_KEY',
     mistral: 'MISTRAL_API_KEY',
     groq: 'GROQ_API_KEY',
     xai: 'XAI_API_KEY',
@@ -376,10 +376,18 @@ export function validateConfig(config: Config): string[] {
 
   const envKey = providerEnvKeys[config.llm.provider];
   const compatibleApiKey = process.env.TRACEMIND_LLM_API_KEY || process.env.NVIDIA_API_KEY;
+  // pi-ai's Google Generative AI adapter reads GEMINI_API_KEY. Retain the
+  // historical GOOGLE_API_KEY alias solely for backwards-compatible validation.
+  const providerKey =
+    config.llm.provider === 'google'
+      ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+      : envKey
+        ? process.env[envKey]
+        : undefined;
   if (
     envKey &&
     !config.llm.apiKey &&
-    !process.env[envKey] &&
+    !providerKey &&
     !(config.llm.provider === 'openai-compatible' && compatibleApiKey)
   ) {
     errors.push(
@@ -493,7 +501,9 @@ export function validateConfig(config: Config): string[] {
   // Check server config
   if (config.server.url) {
     const serverApiKey =
-      process.env.TRACEMIND_SERVER_API_KEY || process.env.RUNBOOK_SERVER_API_KEY || config.server.apiKey;
+      process.env.TRACEMIND_SERVER_API_KEY ||
+      process.env.RUNBOOK_SERVER_API_KEY ||
+      config.server.apiKey;
     if (!serverApiKey) {
       errors.push(
         'Server URL is configured but no API key found. Set server.apiKey or TRACEMIND_SERVER_API_KEY.'

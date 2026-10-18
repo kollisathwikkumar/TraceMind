@@ -87,6 +87,26 @@ function errorText(error: unknown): string {
   return '';
 }
 
+/** Resolve the documented provider credential without exposing it in diagnostics. */
+export function resolvePrimaryProviderApiKey(
+  config: Pick<Config, 'llm'>,
+  environment: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  // This generic deployment override has always been supported for the
+  // configured primary provider, so keep its precedence for rotations.
+  const deploymentKey =
+    environment.TRACEMIND_LLM_API_KEY?.trim() || environment.NVIDIA_API_KEY?.trim();
+  if (deploymentKey) return deploymentKey;
+  if (config.llm.provider === 'google') {
+    // pi-ai's Google adapter uses GEMINI_API_KEY. Keep the historic alias so
+    // existing self-hosted deployments can migrate without a surprise outage.
+    return (
+      environment.GEMINI_API_KEY?.trim() || environment.GOOGLE_API_KEY?.trim() || config.llm.apiKey
+    );
+  }
+  return config.llm.apiKey;
+}
+
 export function classifyLLMProviderFailure(
   error: unknown,
   source: LLMProviderAttemptFailure['source']
@@ -107,7 +127,8 @@ export function classifyLLMProviderFailure(
   else if (/unauthori[sz]ed|invalid (?:api )?key|authentication failed/i.test(text))
     category = 'unauthorized';
   else if (/forbidden|permission denied|insufficient scope/i.test(text)) category = 'forbidden';
-  else if (/model .*not found|unknown model|endpoint .*not found/i.test(text)) category = 'not_found';
+  else if (/model .*not found|unknown model|endpoint .*not found/i.test(text))
+    category = 'not_found';
   else if (/rate.?limit|too many requests|quota exceeded/i.test(text)) category = 'rate_limited';
   else if (/timeout|timed out|request was aborted|aborterror/i.test(text)) category = 'timeout';
   else if (
@@ -152,12 +173,14 @@ export async function validateLLMProvider(
       isFallback && fallbackProvider ? fallbackProvider : config.llm.provider
     ) as Config['llm']['provider'];
     const providerChanged = isFallback && provider !== config.llm.provider;
-    const model = isFallback && fallbackModel ? fallbackModel : providerChanged ? '' : config.llm.model;
-    const apiBaseUrl = isFallback && fallbackBaseUrl
-      ? fallbackBaseUrl
-      : providerChanged
-        ? undefined
-        : config.llm.apiBaseUrl;
+    const model =
+      isFallback && fallbackModel ? fallbackModel : providerChanged ? '' : config.llm.model;
+    const apiBaseUrl =
+      isFallback && fallbackBaseUrl
+        ? fallbackBaseUrl
+        : providerChanged
+          ? undefined
+          : config.llm.apiBaseUrl;
     const usesNvidiaNim =
       provider === 'openai-compatible' && apiBaseUrl?.includes('integrate.api.nvidia.com');
 
@@ -178,18 +201,17 @@ export async function validateLLMProvider(
   // Runtime environment is the deployment source of truth. Prefer it over a
   // possibly stale key persisted in config.yaml so key rotation takes effect
   // without requiring a config-file edit or rebuild.
-  const primaryKey =
-    environment.TRACEMIND_LLM_API_KEY?.trim() ||
-    environment.NVIDIA_API_KEY?.trim() ||
-    config.llm.apiKey;
+  const primaryKey = resolvePrimaryProviderApiKey(config, environment);
   const fallbackKey = environment.TRACEMIND_LLM_FALLBACK_API_KEY?.trim();
   const runAttempt = async (
     source: 'primary' | 'fallback',
     apiKey: string | undefined
   ): Promise<{ content: string; provider: string; model: string }> => {
     const selectedConfig = attemptConfig(source);
-    if (!selectedConfig.model ||
-        (selectedConfig.provider === 'openai-compatible' && !selectedConfig.apiBaseUrl)) {
+    if (
+      !selectedConfig.model ||
+      (selectedConfig.provider === 'openai-compatible' && !selectedConfig.apiBaseUrl)
+    ) {
       throw new LLMValidationError([{ source, category: 'missing_configuration' }]);
     }
     const result = await createLLMClient({ ...selectedConfig, apiKey }).chat(

@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG } from '../utils/config';
 import {
   classifyLLMProviderFailure,
   LLMValidationError,
+  resolvePrimaryProviderApiKey,
   validateLLMProvider,
 } from './llm-validation';
 
@@ -14,6 +15,8 @@ describe('LLM validation fallback', () => {
   afterEach(() => {
     delete process.env.TRACEMIND_LLM_API_KEY;
     delete process.env.NVIDIA_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
     delete process.env.TRACEMIND_LLM_FALLBACK_API_KEY;
     delete process.env.TRACEMIND_LLM_FALLBACK_PROVIDER;
     delete process.env.TRACEMIND_LLM_FALLBACK_MODEL;
@@ -24,6 +27,29 @@ describe('LLM validation fallback', () => {
   beforeEach(() => {
     createLLMClient.mockReset();
     vi.unstubAllGlobals();
+  });
+
+  it('uses GEMINI_API_KEY for the Google Generative AI adapter', async () => {
+    const googleConfig = {
+      ...DEFAULT_CONFIG,
+      llm: { ...DEFAULT_CONFIG.llm, provider: 'google' as const, model: 'gemini-2.5-flash' },
+    };
+    const environment = { GEMINI_API_KEY: 'gemini-test-key' } as NodeJS.ProcessEnv;
+    createLLMClient.mockReturnValue({
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
+    });
+
+    expect(resolvePrimaryProviderApiKey(googleConfig, environment)).toBe('gemini-test-key');
+    await expect(validateLLMProvider(googleConfig, environment, 'primary')).resolves.toMatchObject({
+      provider: 'google',
+      model: 'gemini-2.5-flash',
+      credentialSource: 'primary',
+    });
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'gemini-test-key', provider: 'google' })
+    );
   });
 
   it('retries once with the fallback key when the primary provider call fails', async () => {
@@ -293,7 +319,9 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_PROVIDER = 'anthropic';
-    createLLMClient.mockReturnValue({ chat: vi.fn().mockRejectedValue(new Error('primary failed')) });
+    createLLMClient.mockReturnValue({
+      chat: vi.fn().mockRejectedValue(new Error('primary failed')),
+    });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
       attempts: [
@@ -309,7 +337,9 @@ describe('LLM validation fallback', () => {
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_PROVIDER = 'openai-compatible';
     process.env.TRACEMIND_LLM_FALLBACK_MODEL = 'fallback/model';
-    createLLMClient.mockReturnValue({ chat: vi.fn().mockRejectedValue(new Error('primary failed')) });
+    createLLMClient.mockReturnValue({
+      chat: vi.fn().mockRejectedValue(new Error('primary failed')),
+    });
 
     await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
       attempts: [
@@ -501,6 +531,8 @@ describe('LLM validation fallback', () => {
   it('reports a missing selected credential without attempting another key', async () => {
     delete process.env.TRACEMIND_LLM_API_KEY;
     delete process.env.NVIDIA_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
     delete process.env.TRACEMIND_LLM_FALLBACK_API_KEY;
     const noConfigKey = {
       ...DEFAULT_CONFIG,

@@ -49,6 +49,9 @@ services:
         sync: false
       - key: TRACEMIND_LLM_MODEL
         sync: false
+      # Gemini's provider-native credential; do not use an NVIDIA key here.
+      - key: GEMINI_API_KEY
+        sync: false
       - key: TRACEMIND_LLM_API_KEY
         sync: false
       - key: TRACEMIND_LLM_API_BASE_URL
