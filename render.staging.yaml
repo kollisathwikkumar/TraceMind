@@ -28,7 +28,7 @@ services:
       - key: TRACEMIND_DATABASE_MIGRATION_URL
         sync: false
       - key: TRACEMIND_DATABASE_RUNTIME_ROLE
-        value: tracemind_stage_runtime
+        value: tracemind_stage_limited
       - key: TRACEMIND_FALKORDB_URL
         value: redis://127.0.0.1:6379
       - key: TRACEMIND_FALKORDB_GRAPH_NAME
