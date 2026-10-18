@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.9.0](https://github.com/kollisathwikkumar/TraceMind/compare/v0.8.0...v0.9.0) (2026-10-18)
+
+
+### Features
+
+* expose FalkorDB impact and lifecycle workflows ([64b9fad](https://github.com/kollisathwikkumar/TraceMind/commit/64b9fadc22a2e1a2abffc0f1a6c637bc4536c92c))
+* harden multi-tenant backend release ([f54ccfa](https://github.com/kollisathwikkumar/TraceMind/commit/f54ccfa85cf593f73874705faed4c3b52ddc2ebf))
+* report safe upstream LLM failure diagnostics ([6466ef5](https://github.com/kollisathwikkumar/TraceMind/commit/6466ef56a7ffcd49595050c0aaa76484294f6c14))
+* retry model validation with fallback key ([9901a25](https://github.com/kollisathwikkumar/TraceMind/commit/9901a254690c689da6838e9396ec5368b57aaba8))
+* validate primary and fallback LLM keys independently ([d6e707d](https://github.com/kollisathwikkumar/TraceMind/commit/d6e707d1a15755ef37fce1a367338bb2765edb49))
+
+
+### Bug Fixes
+
+* allow Nemotron reasoning budget during validation ([a0031c6](https://github.com/kollisathwikkumar/TraceMind/commit/a0031c6f3b0c71dcc764d4bbe97b1d4f08979a60))
+* allow new organization members to load dashboard ([4ac0cca](https://github.com/kollisathwikkumar/TraceMind/commit/4ac0cca14942395f80051dce9ef030598a690384))
+* disable reasoning for LLM connectivity probe ([1fed5ef](https://github.com/kollisathwikkumar/TraceMind/commit/1fed5efd20268c71d353833a490fbea7c22a33f5))
+* grant graph catalog runtime access after creation ([3b6b8c0](https://github.com/kollisathwikkumar/TraceMind/commit/3b6b8c074c77ee766ba3364146f4eab2283e0c11))
+* guard Nemotron probes against empty reasoning streams ([d3dff4f](https://github.com/kollisathwikkumar/TraceMind/commit/d3dff4fb46f51950eeace032ecc6d781e8e529cd))
+* identify reasoning-only NVIDIA validation streams ([9f2757c](https://github.com/kollisathwikkumar/TraceMind/commit/9f2757c1fb12a0b56889201b17515858e8c2813b))
+* include validation grant in Auth0 token request ([026f37f](https://github.com/kollisathwikkumar/TraceMind/commit/026f37fd6f43f2714bd98802e9f9d84b61ecf0ce))
+* load LLM provider from deployment environment ([c921066](https://github.com/kollisathwikkumar/TraceMind/commit/c921066c13d5f41e73ba060663106334a58ff24a))
+* preserve Auth0 organization invitations ([a3207df](https://github.com/kollisathwikkumar/TraceMind/commit/a3207df1de6625a2bf1874979bf8919e7f502932))
+* request Auth0 organization claims in dashboard ([1de556e](https://github.com/kollisathwikkumar/TraceMind/commit/1de556ebcb7657c9da3359b8790ba95ca7bfe919))
+* request LLM validation permission ([fecd62a](https://github.com/kollisathwikkumar/TraceMind/commit/fecd62adf57e9ad6e3e505bbe2c3bfc58b98b9d6))
+* request only model validation scope ([0779888](https://github.com/kollisathwikkumar/TraceMind/commit/07798883081f0ff8af9bc25c6cafb37b0ca38407))
+* reserve Nemotron output budget for validation answers ([287dcc8](https://github.com/kollisathwikkumar/TraceMind/commit/287dcc814c7fec90caf1cdb88e503b70ee8695a7))
+* retry LLM validation on empty primary response ([1fc82f5](https://github.com/kollisathwikkumar/TraceMind/commit/1fc82f5efa41c39e7d073b4bbe7bdd3e4951879c))
+* scope NVIDIA validation options to NIM ([67ce050](https://github.com/kollisathwikkumar/TraceMind/commit/67ce0502341ca6b346e78d0e45f1966684dbf47b))
+* send NVIDIA NIM token budget field ([2d0680b](https://github.com/kollisathwikkumar/TraceMind/commit/2d0680b1d6e013a105fdce6eb9316241f9dc4b7f))
+* use direct-answer mode for NVIDIA validation probes ([49af684](https://github.com/kollisathwikkumar/TraceMind/commit/49af6843aec0399c5d026ed7f1951fe2715983c6))
+* validate compatible LLMs with JSON completions ([2a688f9](https://github.com/kollisathwikkumar/TraceMind/commit/2a688f9bc99412f8511ea8b2e5a8addb09fee6ae))
+
 ## [0.8.0](https://github.com/Runbook-Agent/RunbookAI/compare/v0.7.0...v0.8.0) (2026-03-02)
 
 
