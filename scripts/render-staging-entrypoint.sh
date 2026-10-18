@@ -4,6 +4,11 @@ set -eu
 db_pid=''
 app_pid=''
 
+# Keep the embedded demo graph on loopback and require a per-process password.
+graph_password=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
+export REDIS_ARGS="--bind 127.0.0.1 --requirepass $graph_password --maxmemory 128mb --maxmemory-policy noeviction"
+export TRACEMIND_FALKORDB_URL="redis://:$graph_password@127.0.0.1:6379"
+
 stop_children() {
   if [ -n "$app_pid" ]; then
     kill -TERM "$app_pid" 2>/dev/null || true
@@ -32,7 +37,7 @@ while [ "$attempt" -lt 30 ]; do
     echo "FalkorDB process exited before readiness" >&2
     exit 1
   fi
-  if redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
+  if REDISCLI_AUTH="$graph_password" redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
     ready=1
     break
   fi

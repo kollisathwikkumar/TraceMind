@@ -21,7 +21,6 @@ COPY --from=build /app/package.json /app/package.json
 COPY scripts/render-staging-entrypoint.sh /app/render-staging-entrypoint.sh
 
 ENV BROWSER=0 \
-    REDIS_ARGS="--bind 127.0.0.1 --maxmemory 128mb --maxmemory-policy noeviction" \
     FALKORDB_ARGS="THREAD_COUNT 1"
 
 EXPOSE 10000
