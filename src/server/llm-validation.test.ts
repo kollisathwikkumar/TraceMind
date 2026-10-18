@@ -15,6 +15,10 @@ describe('LLM validation fallback', () => {
     delete process.env.TRACEMIND_LLM_API_KEY;
     delete process.env.NVIDIA_API_KEY;
     delete process.env.TRACEMIND_LLM_FALLBACK_API_KEY;
+    delete process.env.TRACEMIND_LLM_FALLBACK_PROVIDER;
+    delete process.env.TRACEMIND_LLM_FALLBACK_MODEL;
+    delete process.env.TRACEMIND_LLM_FALLBACK_API_BASE_URL;
+    delete process.env.TRACEMIND_LLM_FALLBACK_BASE_URL;
   });
 
   beforeEach(() => {
@@ -41,6 +45,8 @@ describe('LLM validation fallback', () => {
       content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
+      provider: DEFAULT_CONFIG.llm.provider,
+      model: DEFAULT_CONFIG.llm.model,
       primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
     });
     expect(createLLMClient).toHaveBeenNthCalledWith(
@@ -68,6 +74,8 @@ describe('LLM validation fallback', () => {
       content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
+      provider: DEFAULT_CONFIG.llm.provider,
+      model: DEFAULT_CONFIG.llm.model,
       primaryFailure: { source: 'primary', category: 'empty_response' },
     });
     expect(createLLMClient).toHaveBeenCalledTimes(2);
@@ -180,6 +188,18 @@ describe('LLM validation fallback', () => {
     });
   });
 
+  it.each([
+    ['authentication failed: private details', 'unauthorized'],
+    ['permission denied: private details', 'forbidden'],
+    ['model vendor/unknown-model not found', 'not_found'],
+    ['rate limit exceeded: private details', 'rate_limited'],
+  ] as const)('normalizes provider diagnostic %s to %s', (message, category) => {
+    expect(classifyLLMProviderFailure(new Error(message), 'fallback')).toEqual({
+      source: 'fallback',
+      category,
+    });
+  });
+
   it('reports safe diagnostics for both a failed primary and failed fallback', async () => {
     process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
     process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
@@ -221,6 +241,8 @@ describe('LLM validation fallback', () => {
       content: 'TraceMind model connection successful.',
       usedFallback: false,
       credentialSource: 'primary',
+      provider: DEFAULT_CONFIG.llm.provider,
+      model: DEFAULT_CONFIG.llm.model,
     });
     expect(createLLMClient).toHaveBeenCalledOnce();
   });
@@ -267,6 +289,37 @@ describe('LLM validation fallback', () => {
     );
   });
 
+  it('requires an explicit fallback model when the fallback provider differs', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_PROVIDER = 'anthropic';
+    createLLMClient.mockReturnValue({ chat: vi.fn().mockRejectedValue(new Error('primary failed')) });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
+      attempts: [
+        { source: 'primary', category: 'unknown' },
+        { source: 'fallback', category: 'missing_configuration' },
+      ],
+    });
+    expect(createLLMClient).toHaveBeenCalledOnce();
+  });
+
+  it('requires a fallback URL when a changed fallback provider is OpenAI-compatible', async () => {
+    process.env.TRACEMIND_LLM_API_KEY = 'primary-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_API_KEY = 'fallback-test-key';
+    process.env.TRACEMIND_LLM_FALLBACK_PROVIDER = 'openai-compatible';
+    process.env.TRACEMIND_LLM_FALLBACK_MODEL = 'fallback/model';
+    createLLMClient.mockReturnValue({ chat: vi.fn().mockRejectedValue(new Error('primary failed')) });
+
+    await expect(validateLLMProvider(DEFAULT_CONFIG)).rejects.toMatchObject({
+      attempts: [
+        { source: 'primary', category: 'unknown' },
+        { source: 'fallback', category: 'missing_configuration' },
+      ],
+    });
+    expect(createLLMClient).toHaveBeenCalledOnce();
+  });
+
   it('uses NVIDIA direct-answer request options for NVIDIA NIM validation', async () => {
     createLLMClient.mockReturnValue({
       chat: vi
@@ -289,6 +342,8 @@ describe('LLM validation fallback', () => {
       content: 'TraceMind model connection successful.',
       usedFallback: false,
       credentialSource: 'primary',
+      provider: compatibleConfig.llm.provider,
+      model: compatibleConfig.llm.model,
     });
     expect(createLLMClient).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -355,11 +410,92 @@ describe('LLM validation fallback', () => {
       content: 'TraceMind model connection successful.',
       usedFallback: true,
       credentialSource: 'fallback',
+      provider: DEFAULT_CONFIG.llm.provider,
+      model: DEFAULT_CONFIG.llm.model,
     });
     expect(createLLMClient).toHaveBeenCalledOnce();
     expect(createLLMClient).toHaveBeenCalledWith(
       expect.objectContaining({ apiKey: 'fallback-test-key' })
     );
+  });
+
+  it('uses the dedicated fallback provider, model, base URL, and fallback credential together', async () => {
+    const environment = {
+      TRACEMIND_LLM_API_KEY: 'primary-test-key',
+      TRACEMIND_LLM_FALLBACK_API_KEY: 'fallback-test-key',
+      TRACEMIND_LLM_FALLBACK_PROVIDER: 'openai-compatible',
+      TRACEMIND_LLM_FALLBACK_MODEL: 'vendor/fallback-model',
+      TRACEMIND_LLM_FALLBACK_API_BASE_URL: 'https://fallback.example.test/v1/',
+    };
+    createLLMClient.mockReturnValue({
+      chat: vi
+        .fn()
+        .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
+    });
+
+    await expect(
+      validateLLMProvider(DEFAULT_CONFIG, environment, 'fallback')
+    ).resolves.toMatchObject({
+      credentialSource: 'fallback',
+      usedFallback: true,
+      provider: 'openai-compatible',
+      model: 'vendor/fallback-model',
+    });
+    expect(createLLMClient).toHaveBeenCalledOnce();
+    expect(createLLMClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'openai-compatible',
+        model: 'vendor/fallback-model',
+        apiBaseUrl: 'https://fallback.example.test/v1/',
+        apiKey: 'fallback-test-key',
+      })
+    );
+  });
+
+  it('supports the legacy fallback base URL and leaves primary provider selection unchanged', async () => {
+    const environment = {
+      TRACEMIND_LLM_API_KEY: 'primary-test-key',
+      TRACEMIND_LLM_FALLBACK_API_KEY: 'fallback-test-key',
+      TRACEMIND_LLM_FALLBACK_PROVIDER: 'openai-compatible',
+      TRACEMIND_LLM_FALLBACK_MODEL: 'vendor/fallback-model',
+      TRACEMIND_LLM_FALLBACK_BASE_URL: 'https://legacy-fallback.example.test/v1/',
+    };
+    createLLMClient
+      .mockReturnValueOnce({ chat: vi.fn().mockRejectedValue(new Error('primary unavailable')) })
+      .mockReturnValueOnce({
+        chat: vi
+          .fn()
+          .mockResolvedValue({ content: 'TraceMind model connection successful.', toolCalls: [] }),
+      });
+
+    await validateLLMProvider(DEFAULT_CONFIG, environment);
+    expect(createLLMClient).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        provider: DEFAULT_CONFIG.llm.provider,
+        model: DEFAULT_CONFIG.llm.model,
+        apiBaseUrl: DEFAULT_CONFIG.llm.apiBaseUrl,
+        apiKey: 'primary-test-key',
+      })
+    );
+    expect(createLLMClient).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        provider: 'openai-compatible',
+        model: 'vendor/fallback-model',
+        apiBaseUrl: 'https://legacy-fallback.example.test/v1/',
+        apiKey: 'fallback-test-key',
+      })
+    );
+  });
+
+  it('does not try the primary credential when explicitly validating a missing fallback key', async () => {
+    await expect(
+      validateLLMProvider(DEFAULT_CONFIG, { TRACEMIND_LLM_API_KEY: 'primary-test-key' }, 'fallback')
+    ).rejects.toMatchObject({
+      attempts: [{ source: 'fallback', category: 'missing_key' }],
+    });
+    expect(createLLMClient).not.toHaveBeenCalled();
   });
 
   it('reports a missing selected credential without attempting another key', async () => {

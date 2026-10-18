@@ -45,6 +45,24 @@ describe('OpenAI-compatible model configuration', () => {
     );
   });
 
+  it('passes a provider key per request without mutating process-wide credentials', async () => {
+    const original = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'existing-process-key';
+    try {
+      const client = createLLMClient({ provider: 'openai', model: 'gpt-4o', apiKey: 'request-key' });
+      await client.chat('system', 'user');
+      expect(complete).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.any(Object),
+        expect.objectContaining({ apiKey: 'request-key' })
+      );
+      expect(process.env.OPENAI_API_KEY).toBe('existing-process-key');
+    } finally {
+      if (original === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = original;
+    }
+  });
+
   it('requires a base URL for a custom provider', () => {
     expect(() => createLLMClient({ provider: 'openai-compatible', model: 'model-id' })).toThrow(
       'OpenAI-compatible provider requires llm.apiBaseUrl'
@@ -64,6 +82,42 @@ describe('OpenAI-compatible model configuration', () => {
       expect.any(Object),
       expect.objectContaining({ apiKey: 'nvidia-test-key' })
     );
+  });
+
+  it('preserves OpenAI-compatible reasoning blocks in pi-ai response shape', async () => {
+    complete.mockResolvedValueOnce({
+      content: [
+        { type: 'thinking', thinking: 'internal reasoning ' },
+        { type: 'thinking', thinking: 'continues' },
+      ],
+      stopReason: 'stop',
+    });
+    const client = createLLMClient({
+      provider: 'openai-compatible',
+      model: 'vendor/reasoning-model',
+      apiBaseUrl: 'https://api.example.test/v1',
+    });
+
+    await expect(client.chat('system', 'user')).resolves.toMatchObject({
+      content: '',
+      thinking: 'internal reasoning continues',
+      toolCalls: [],
+    });
+  });
+
+  it('keeps truly empty completions empty for the validation layer to reject', async () => {
+    complete.mockResolvedValueOnce({ content: [], stopReason: 'stop' });
+    const client = createLLMClient({
+      provider: 'openai-compatible',
+      model: 'vendor/empty-model',
+      apiBaseUrl: 'https://api.example.test/v1',
+    });
+
+    await expect(client.chat('system', 'user')).resolves.toMatchObject({
+      content: '',
+      thinking: undefined,
+      toolCalls: [],
+    });
   });
 
   it('aborts a provider request at the configured timeout', async () => {

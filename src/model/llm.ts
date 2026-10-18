@@ -75,12 +75,6 @@ class PiAIClient implements LLMClient {
   constructor(config: LLMConfig) {
     this.config = config;
 
-    // Set API key in environment if provided
-    if (config.apiKey && config.provider !== 'openai-compatible') {
-      const envKey = this.getEnvKeyName(config.provider);
-      process.env[envKey] = config.apiKey;
-    }
-
     if (config.provider === 'openai-compatible') {
       if (!config.apiBaseUrl) {
         throw new Error('OpenAI-compatible provider requires llm.apiBaseUrl');
@@ -117,26 +111,6 @@ class PiAIClient implements LLMClient {
           `Try using a different model name (e.g., gpt-4o for OpenAI, claude-sonnet-4-20250514 for Anthropic).`
       );
     }
-  }
-
-  private getEnvKeyName(provider: Provider): string {
-    const envKeys: Record<Provider, string> = {
-      openai: 'OPENAI_API_KEY',
-      'openai-compatible': 'TRACEMIND_LLM_API_KEY',
-      anthropic: 'ANTHROPIC_API_KEY',
-      google: 'GOOGLE_API_KEY',
-      mistral: 'MISTRAL_API_KEY',
-      groq: 'GROQ_API_KEY',
-      xai: 'XAI_API_KEY',
-      openrouter: 'OPENROUTER_API_KEY',
-      bedrock: 'AWS_ACCESS_KEY_ID', // Bedrock uses AWS credentials
-      azure: 'AZURE_OPENAI_API_KEY',
-      vertex: 'GOOGLE_APPLICATION_CREDENTIALS',
-      cerebras: 'CEREBRAS_API_KEY',
-      github: 'GITHUB_TOKEN',
-      ollama: '', // Ollama doesn't need an API key
-    };
-    return envKeys[provider] || '';
   }
 
   async chat(systemPrompt: string, userPrompt: string, tools?: Tool[]): Promise<LLMResponse> {
@@ -184,9 +158,17 @@ class PiAIClient implements LLMClient {
       return this.parseResponse(response);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(
+      const wrapped = new Error(
         `LLM API error (${this.config.provider}/${this.config.model}): ${errorMessage}`
       );
+      if (error && typeof error === 'object') {
+        const candidate = error as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
+        const status = [candidate.status, candidate.statusCode, candidate.response?.status].find(
+          (value): value is number => typeof value === 'number' && value >= 100 && value <= 599
+        );
+        if (status !== undefined) Object.assign(wrapped, { status });
+      }
+      throw wrapped;
     } finally {
       if (timeout) clearTimeout(timeout);
     }
@@ -287,9 +269,11 @@ class PiAIClient implements LLMClient {
    * Parse pi-ai response into our format
    */
   private parseResponse(response: {
-    content: Array<{
+    content?: Array<{
       type: string;
       text?: string;
+      /** pi-ai stores OpenAI-compatible reasoning here, not in `text`. */
+      thinking?: string;
       id?: string;
       name?: string;
       arguments?: unknown;
@@ -305,7 +289,7 @@ class PiAIClient implements LLMClient {
     const toolCalls: ToolCall[] = [];
     let thinking: string | undefined;
 
-    for (const block of response.content) {
+    for (const block of response.content ?? []) {
       if (block.type === 'text' && block.text) {
         content += block.text;
       } else if (block.type === 'toolCall' && block.id && block.name) {
@@ -314,8 +298,12 @@ class PiAIClient implements LLMClient {
           name: block.name,
           args: (block.arguments as Record<string, unknown>) || {},
         });
-      } else if (block.type === 'thinking' && block.text) {
-        thinking = block.text;
+      } else if (block.type === 'thinking') {
+        // pi-ai's OpenAI-compatible streaming adapter maps reasoning_content,
+        // reasoning, and reasoning_text to `{ type: 'thinking', thinking }`.
+        // Keep legacy adapters' `text` representation compatible as well.
+        const reasoning = block.thinking ?? block.text;
+        if (reasoning) thinking = thinking ? `${thinking}${reasoning}` : reasoning;
       }
     }
 

@@ -79,6 +79,8 @@ export interface RouterConfig {
     content: string;
     usedFallback?: boolean;
     credentialSource?: 'primary' | 'fallback';
+    provider?: string;
+    model?: string;
     primaryFailure?: { source: 'primary'; category: string; status?: number };
   }>;
 }
@@ -435,8 +437,8 @@ export function createRouter(routerConfig: RouterConfig) {
         sendJson(res, 200, {
           data: {
             status: 'connected',
-            provider: config.llm.provider,
-            model: config.llm.model,
+            provider: validation.provider || config.llm.provider,
+            model: validation.model || config.llm.model,
             response: response.slice(0, 2000),
             usedFallback: validation.usedFallback ?? false,
             ...(validation.credentialSource

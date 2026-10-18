@@ -10,12 +10,15 @@ export interface LLMValidationResponse {
   content: string;
   usedFallback: boolean;
   credentialSource: 'primary' | 'fallback';
+  provider?: string;
+  model?: string;
   /** Sanitized primary-key failure, present only when fallback answered. */
   primaryFailure?: LLMProviderAttemptFailure;
 }
 
 export type LLMProviderFailureCategory =
   | 'missing_key'
+  | 'missing_configuration'
   | 'reasoning_only'
   | 'unexpected_response'
   | 'unauthorized'
@@ -101,6 +104,11 @@ export function classifyLLMProviderFailure(
   else if (status === 404) category = 'not_found';
   else if (status === 429) category = 'rate_limited';
   else if (status !== undefined) category = 'upstream_http';
+  else if (/unauthori[sz]ed|invalid (?:api )?key|authentication failed/i.test(text))
+    category = 'unauthorized';
+  else if (/forbidden|permission denied|insufficient scope/i.test(text)) category = 'forbidden';
+  else if (/model .*not found|unknown model|endpoint .*not found/i.test(text)) category = 'not_found';
+  else if (/rate.?limit|too many requests|quota exceeded/i.test(text)) category = 'rate_limited';
   else if (/timeout|timed out|request was aborted|aborterror/i.test(text)) category = 'timeout';
   else if (
     /fetch failed|network|econn|enotfound|eai_again|socket|connection (?:error|refused|reset)|tls|und_err/i.test(
@@ -129,17 +137,42 @@ export async function validateLLMProvider(
   environment: NodeJS.ProcessEnv = process.env,
   credentialSource: 'auto' | 'primary' | 'fallback' = 'auto'
 ): Promise<LLMValidationResponse> {
-  const usesNvidiaNim =
-    config.llm.provider === 'openai-compatible' &&
-    config.llm.apiBaseUrl?.includes('integrate.api.nvidia.com');
-  const base = {
-    ...config.llm,
-    // Validation asks for a fixed, tiny answer, so disable long-form
-    // reasoning and reserve only a small visible-output budget. NVIDIA's
-    // hosted NIM guide uses this direct-answer mode for simple prompts.
-    maxTokens: config.llm.provider === 'openai-compatible' ? 512 : 256,
-    requestTimeoutMs: config.llm.provider === 'openai-compatible' ? 90_000 : 45_000,
-    ...(usesNvidiaNim ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } } : {}),
+  const fallbackProvider = environment.TRACEMIND_LLM_FALLBACK_PROVIDER?.trim();
+  const fallbackModel = environment.TRACEMIND_LLM_FALLBACK_MODEL?.trim();
+  const fallbackBaseUrl =
+    environment.TRACEMIND_LLM_FALLBACK_API_BASE_URL?.trim() ||
+    environment.TRACEMIND_LLM_FALLBACK_BASE_URL?.trim();
+
+  // Keep each credential attached to its own provider configuration. In
+  // particular, a fallback NVIDIA key must not be probed against the primary
+  // model/host when the fallback provider has been configured separately.
+  const attemptConfig = (source: 'primary' | 'fallback') => {
+    const isFallback = source === 'fallback';
+    const provider = (
+      isFallback && fallbackProvider ? fallbackProvider : config.llm.provider
+    ) as Config['llm']['provider'];
+    const providerChanged = isFallback && provider !== config.llm.provider;
+    const model = isFallback && fallbackModel ? fallbackModel : providerChanged ? '' : config.llm.model;
+    const apiBaseUrl = isFallback && fallbackBaseUrl
+      ? fallbackBaseUrl
+      : providerChanged
+        ? undefined
+        : config.llm.apiBaseUrl;
+    const usesNvidiaNim =
+      provider === 'openai-compatible' && apiBaseUrl?.includes('integrate.api.nvidia.com');
+
+    return {
+      ...config.llm,
+      provider,
+      model,
+      apiBaseUrl,
+      // Validation asks for a fixed, tiny answer, so disable long-form
+      // reasoning and reserve only a small visible-output budget. NVIDIA's
+      // hosted NIM guide uses this direct-answer mode for simple prompts.
+      maxTokens: provider === 'openai-compatible' ? 512 : 256,
+      requestTimeoutMs: provider === 'openai-compatible' ? 90_000 : 45_000,
+      ...(usesNvidiaNim ? { extraBody: { chat_template_kwargs: { enable_thinking: false } } } : {}),
+    };
   };
 
   // Runtime environment is the deployment source of truth. Prefer it over a
@@ -150,8 +183,16 @@ export async function validateLLMProvider(
     environment.NVIDIA_API_KEY?.trim() ||
     config.llm.apiKey;
   const fallbackKey = environment.TRACEMIND_LLM_FALLBACK_API_KEY?.trim();
-  const runAttempt = async (apiKey: string | undefined): Promise<string> => {
-    const result = await createLLMClient({ ...base, apiKey }).chat(
+  const runAttempt = async (
+    source: 'primary' | 'fallback',
+    apiKey: string | undefined
+  ): Promise<{ content: string; provider: string; model: string }> => {
+    const selectedConfig = attemptConfig(source);
+    if (!selectedConfig.model ||
+        (selectedConfig.provider === 'openai-compatible' && !selectedConfig.apiBaseUrl)) {
+      throw new LLMValidationError([{ source, category: 'missing_configuration' }]);
+    }
+    const result = await createLLMClient({ ...selectedConfig, apiKey }).chat(
       VALIDATION_SYSTEM_PROMPT,
       VALIDATION_USER_PROMPT
     );
@@ -162,7 +203,7 @@ export async function validateLLMProvider(
     if (content !== VALIDATION_EXPECTED_RESPONSE) {
       throw new UnexpectedLLMResponseError();
     }
-    return content;
+    return { content, provider: selectedConfig.provider, model: selectedConfig.model };
   };
 
   // Explicit key checks are single-attempt by design: validating one secret
@@ -174,32 +215,37 @@ export async function validateLLMProvider(
     }
     try {
       return {
-        content: await runAttempt(selectedKey),
+        ...(await runAttempt(credentialSource, selectedKey)),
         usedFallback: credentialSource === 'fallback',
         credentialSource,
       };
     } catch (error) {
+      if (error instanceof LLMValidationError) throw error;
       throw new LLMValidationError([classifyLLMProviderFailure(error, credentialSource)]);
     }
   }
 
   try {
-    const content = await runAttempt(primaryKey);
-    return { content, usedFallback: false, credentialSource: 'primary' };
+    const result = await runAttempt('primary', primaryKey);
+    return { ...result, usedFallback: false, credentialSource: 'primary' };
   } catch (primaryError) {
     const attempts = [classifyLLMProviderFailure(primaryError, 'primary')];
     if (!fallbackKey || fallbackKey === primaryKey) throw new LLMValidationError(attempts);
     try {
-      const content = await runAttempt(fallbackKey);
+      const result = await runAttempt('fallback', fallbackKey);
       // Keep the successful fallback result while exposing only the
       // allowlisted primary failure category/status for key diagnosis.
       return {
-        content,
+        ...result,
         usedFallback: true,
         credentialSource: 'fallback',
         primaryFailure: attempts[0],
       };
     } catch (fallbackError) {
+      if (fallbackError instanceof LLMValidationError) {
+        attempts.push(...fallbackError.attempts);
+        throw new LLMValidationError(attempts);
+      }
       attempts.push(classifyLLMProviderFailure(fallbackError, 'fallback'));
       throw new LLMValidationError(attempts);
     }

@@ -569,6 +569,8 @@ describe('incident API', () => {
         content: 'TraceMind model connection successful.',
         usedFallback: true,
         credentialSource: credentialSource === 'auto' ? 'fallback' : credentialSource,
+        provider: 'openai-compatible',
+        model: 'vendor/fallback-model',
         primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
       })
     );
@@ -585,6 +587,8 @@ describe('incident API', () => {
         response: 'TraceMind model connection successful.',
         usedFallback: true,
         credentialSource: 'fallback',
+        provider: 'openai-compatible',
+        model: 'vendor/fallback-model',
         primaryFailure: { source: 'primary', category: 'unauthorized', status: 401 },
       },
     });
