@@ -26,6 +26,10 @@ COPY --from=graph-runtime / /
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
 COPY --from=build /app/dist /app/dist
 COPY --from=build /app/src/server/admin-dist /app/src/server/admin-dist
+# The public root route resolves these launch assets from /app/docs at runtime.
+COPY --from=build /app/docs/launch.html /app/docs/launch.html
+COPY --from=build /app/docs/launch.css /app/docs/launch.css
+COPY --from=build /app/docs/launch.js /app/docs/launch.js
 COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/package.json /app/package.json
 COPY scripts/render-staging-entrypoint.sh /app/render-staging-entrypoint.sh
